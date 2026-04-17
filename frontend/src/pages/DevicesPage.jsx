@@ -6,7 +6,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Monitor, Plus, Search, RefreshCw,
-  Play, Terminal, Trash2, X
+  Play, Terminal, Trash2, X, Download
 } from 'lucide-react';
 import { devicesAPI, guacamoleAPI } from '../lib/api';
 import { useWSEvent } from '../lib/socket';
@@ -105,9 +105,15 @@ export default function DevicesPage() {
           <h2 className="text-xl font-semibold text-white">Device Management</h2>
           <p className="text-sm text-white/40 mt-1">{devices.length} devices registered</p>
         </div>
-        <button onClick={() => setShowAddModal(true)} className="glass-button flex items-center gap-2 w-fit">
-          <Plus className="w-4 h-4" /> Add Device
-        </button>
+        <div className="flex items-center gap-3">
+          <a href="/downloads/" target="_blank" rel="noopener noreferrer"
+            className="glass-button-outline flex items-center gap-2 w-fit text-sm">
+            <Download className="w-4 h-4" /> Download Agent
+          </a>
+          <button onClick={() => setShowAddModal(true)} className="glass-button flex items-center gap-2 w-fit">
+            <Plus className="w-4 h-4" /> Add Device
+          </button>
+        </div>
       </div>
 
       {/* Status Tabs */}
