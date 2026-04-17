@@ -30,6 +30,7 @@ const logRoutes = require('./routes/logs');
 const agentRoutes = require('./routes/agent');
 const dashboardRoutes = require('./routes/dashboard');
 const userRoutes = require('./routes/users');
+const downloadRoutes = require('./routes/downloads');
 
 const app = express();
 const server = http.createServer(app);
@@ -96,6 +97,7 @@ app.use('/api/logs', logRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/users', userRoutes);
+app.use('/downloads', downloadRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────
 app.use((req, res) => {
