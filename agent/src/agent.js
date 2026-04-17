@@ -84,13 +84,30 @@ function executeScript(scriptData) {
   const { scriptId, content, type, requestedBy } = scriptData;
   logger.info(`Executing script ${scriptId} (${type}) requested by ${requestedBy}`);
 
-  const cmd = type === 'powershell' ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "${content.replace(/"/g, '\\"')}"` :
-              type === 'bash' ? content : `python3 -c "${content}"`;
-
+  const ext = type === 'powershell' ? '.ps1' : type === 'python' ? '.py' : '.sh';
+  const tmpFile = path.join(os.tmpdir(), `nexusit-script-${uuidv4()}${ext}`);
   const timeout = 60000; // 60 second timeout
 
+  let cmd;
+  if (type === 'powershell') {
+    cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${tmpFile}"`;
+  } else if (type === 'python') {
+    cmd = `python3 "${tmpFile}"`;
+  } else {
+    cmd = `bash "${tmpFile}"`;
+  }
+
   return new Promise((resolve) => {
+    try {
+      fs.writeFileSync(tmpFile, content, { mode: 0o600 });
+    } catch (writeErr) {
+      resolve({ scriptId, exit_code: 1, output: '', error: `Failed to write script: ${writeErr.message}` });
+      return;
+    }
+
     exec(cmd, { timeout, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      try { fs.unlinkSync(tmpFile); } catch (_) {}
+
       const result = {
         scriptId,
         exit_code: error ? error.code || 1 : 0,
