@@ -91,34 +91,8 @@ services:
     networks:
       - nexusit-network
 
-  # ─── Guacamole Daemon (guacd) ─────────────────────────────
-  guacd:
-    image: guacamole/guacd:1.5.4
-    container_name: nexusit-guacd
-    restart: unless-stopped
-    networks:
-      - nexusit-network
-
-  # ─── Apache Guacamole Web App ─────────────────────────────
-  guacamole:
-    image: guacamole/guacamole:1.5.4
-    container_name: nexusit-guacamole
-    restart: unless-stopped
-    depends_on:
-      - guacd
-      - postgres
-    environment:
-      GUACD_HOSTNAME: guacd
-      GUACD_PORT: 4822
-      POSTGRESQL_HOSTNAME: postgres
-      POSTGRESQL_PORT: 5432
-      POSTGRESQL_DATABASE: ${DB_NAME:-ai_it_support}
-      POSTGRESQL_USER: ${DB_USER:-postgres}
-      POSTGRESQL_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
-    ports:
-      - "8080:8080"
-    networks:
-      - nexusit-network
+  # guacd and guacamole commented out — require DB schema init before use
+  # Add back with proper initdb.sql initialization
 
 volumes:
   postgres_data:
