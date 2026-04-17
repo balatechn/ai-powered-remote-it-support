@@ -163,8 +163,26 @@ router.get('/', (req, res) => {
   <li><a href="/downloads/install-windows.ps1">install-windows.ps1</a> — Windows auto-installer</li>
   <li><a href="/downloads/agent.js">agent.js</a> — Agent source</li>
   <li><a href="/downloads/agent-package.json">package.json</a> — Dependencies</li>
+  <li><a href="/downloads/NexusIT-Setup.exe">NexusIT-Setup.exe</a> — Windows desktop app (76 MB)</li>
 </ul>
 </body></html>`);
+});
+
+// ── GET /downloads/NexusIT-Setup.exe ─────────────────────────
+router.get('/NexusIT-Setup.exe', (req, res) => {
+  const fs = require('fs');
+  const candidates = [
+    '/opt/nexusit/downloads-static/NexusIT Setup 1.0.0.exe',
+    require('path').resolve(__dirname, '../../../../electron/dist/NexusIT Setup 1.0.0.exe')
+  ];
+  for (const f of candidates) {
+    if (fs.existsSync(f)) {
+      res.setHeader('Content-Disposition', 'attachment; filename="NexusIT-Setup.exe"');
+      res.setHeader('Content-Type', 'application/octet-stream');
+      return res.sendFile(f);
+    }
+  }
+  res.status(404).send('NexusIT Setup installer not yet available. Please check back later.');
 });
 
 module.exports = router;
