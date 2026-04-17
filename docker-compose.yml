@@ -80,13 +80,15 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    ports:
+      - "80:80"
     networks:
       - nexusit-network
-      - coolify
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.services.http-0-yxrykof75fc8rvjq7romfkh6-frontend.loadbalancer.server.port=80"
-      - "traefik.http.routers.http-0-yxrykof75fc8rvjq7romfkh6-frontend.service=http-0-yxrykof75fc8rvjq7romfkh6-frontend"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   # guacd and guacamole commented out — require DB schema init before use
   # Add back with proper initdb.sql initialization
@@ -100,5 +102,3 @@ volumes:
 networks:
   nexusit-network:
     driver: bridge
-  coolify:
-    external: true
