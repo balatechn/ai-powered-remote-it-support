@@ -68,6 +68,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AGENT_SECRET: ${AGENT_SECRET:-change_this_agent_secret}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+    volumes:
+      - ./agent:/opt/nexusit/agent:ro
     networks:
       - nexusit-network
 
