@@ -4,7 +4,7 @@
  */
 
 const jwt = require('jsonwebtoken');
-const logger = require('./utils/logger');
+const logger = require('../utils/logger');
 
 // Track connected clients
 const connectedAgents = new Map();  // deviceId -> socket
