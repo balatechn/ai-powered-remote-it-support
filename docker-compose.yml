@@ -83,6 +83,9 @@ services:
     networks:
       - nexusit-network
       - coolify
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=coolify"
 
   # guacd and guacamole commented out — require DB schema init before use
   # Add back with proper initdb.sql initialization
