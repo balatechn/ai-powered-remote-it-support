@@ -82,6 +82,7 @@ services:
       - backend
     networks:
       - nexusit-network
+      - coolify
 
   # guacd and guacamole commented out — require DB schema init before use
   # Add back with proper initdb.sql initialization
@@ -95,3 +96,5 @@ volumes:
 networks:
   nexusit-network:
     driver: bridge
+  coolify:
+    external: true
