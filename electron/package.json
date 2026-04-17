@@ -1,0 +1,29 @@
+{
+  "name": "nexusit-desktop",
+  "version": "1.0.0",
+  "description": "NexusIT Desktop - AI-Powered Remote IT Support",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "io.nexusit.desktop",
+    "productName": "NexusIT",
+    "directories": { "output": "dist" },
+    "win": { "target": "nsis", "icon": "assets/icon.ico" },
+    "mac": { "target": "dmg", "icon": "assets/icon.icns" },
+    "linux": { "target": "AppImage", "icon": "assets/icon.png" }
+  },
+  "dependencies": {
+    "electron-store": "^10.0.0"
+  },
+  "devDependencies": {
+    "electron": "^32.1.2",
+    "electron-builder": "^25.1.7"
+  }
+}
