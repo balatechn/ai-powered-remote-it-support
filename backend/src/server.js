@@ -30,7 +30,6 @@ const logRoutes = require('./routes/logs');
 const agentRoutes = require('./routes/agent');
 const dashboardRoutes = require('./routes/dashboard');
 const userRoutes = require('./routes/users');
-const guacamoleRoutes = require('./routes/guacamole');
 
 const app = express();
 const server = http.createServer(app);
@@ -97,7 +96,6 @@ app.use('/api/logs', logRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/guacamole', guacamoleRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────
 app.use((req, res) => {
