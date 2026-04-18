@@ -391,24 +391,4 @@ export default function UsersPage() {
     </div>
   );
 }
-        </table>
-      </div>
-
-      {/* Modals */}
-      {modalUser !== undefined && (
-        <UserModal
-          user={modalUser}
-          onClose={() => setModalUser(undefined)}
-          onSave={() => { setModalUser(undefined); loadUsers(); }}
-        />
-      )}
-      {resetUser && (
-        <ResetPasswordModal user={resetUser} onClose={() => setResetUser(null)} />
-      )}
-      {changePwd && (
-        <ChangePasswordModal onClose={() => setChangePwd(false)} />
-      )}
-    </div>
-  );
-}
 }
