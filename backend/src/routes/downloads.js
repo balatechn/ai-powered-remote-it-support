@@ -105,6 +105,26 @@ router.get('/install-windows.ps1', (req, res) => {
   const host  = req.headers.host || '187.127.134.246:3080';
   const base  = `${proto}://${host}`;
 
+  // Embed agent.js and package.json as base64 to avoid secondary HTTP downloads
+  // (which may be blocked by transparent proxies on client networks)
+  const agentCandidates = [
+    '/opt/nexusit/agent/src/agent.js',
+    path.resolve(__dirname, '../../../../agent/src/agent.js')
+  ];
+  let agentB64 = '';
+  for (const f of agentCandidates) {
+    if (fs.existsSync(f)) { agentB64 = fs.readFileSync(f).toString('base64'); break; }
+  }
+  const pkgJson = JSON.stringify({
+    name: 'nexusit-agent', version: '1.0.0', main: 'src/agent.js',
+    scripts: { start: 'node src/agent.js' },
+    dependencies: {
+      dotenv: '^16.4.5', 'socket.io-client': '^4.8.0',
+      systeminformation: '^5.23.5', uuid: '^10.0.0', winston: '^3.14.2'
+    }
+  });
+  const pkgB64 = Buffer.from(pkgJson).toString('base64');
+
   const script = `# NexusIT Endpoint Agent Installer - Windows
 # Run as Administrator in PowerShell:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex
@@ -113,10 +133,6 @@ $ErrorActionPreference = "Stop"
 $INSTALL_DIR = "C:\\NexusIT-Agent"
 $TASK_NAME   = "NexusIT-Agent"
 $SERVER_URL  = "${base}"
-
-# Bypass system proxy so Invoke-WebRequest connects directly to the server
-[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 
 function Pause-OnExit {
     Write-Host ""
@@ -151,6 +167,7 @@ try {
     if (-not $nodePath) {
         Write-Host "      Node.js not found. Downloading installer..." -ForegroundColor Yellow
         $msi = "$env:TEMP\\node-installer.msi"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest "https://nodejs.org/dist/v20.18.0/node-v20.18.0-x64.msi" -OutFile $msi -UseBasicParsing
         Start-Process msiexec.exe -Wait -ArgumentList "/I \`"$msi\`" /quiet /norestart"
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
@@ -159,22 +176,24 @@ try {
         Write-Host "      Node.js $(node --version) found." -ForegroundColor Green
     }
 
-    # Step 2 - Create directories and download files
-    Write-Host "[2/4] Downloading agent files..." -ForegroundColor Yellow
+    # Step 2 - Write agent files (embedded in this script - no HTTP downloads needed)
+    Write-Host "[2/4] Writing agent files..." -ForegroundColor Yellow
     if (Test-Path $INSTALL_DIR) { Remove-Item -Recurse -Force $INSTALL_DIR }
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
-    Invoke-WebRequest "$SERVER_URL/downloads/agent.js"           -OutFile "$INSTALL_DIR\\src\\agent.js" -UseBasicParsing
-    Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json"  -UseBasicParsing
-    # Validate downloaded package.json is real JSON
-    $pkgContent = Get-Content "$INSTALL_DIR\\package.json" -Raw
-    try { $null = $pkgContent | ConvertFrom-Json } catch {
-        throw "Downloaded package.json is not valid JSON. Server returned: $($pkgContent.Substring(0, [Math]::Min(300, $pkgContent.Length)))"
-    }
-    Write-Host "      Files downloaded." -ForegroundColor Green
 
-    # Step 3 - Write config
-    Write-Host "[3/4] Writing config..." -ForegroundColor Yellow
+    $agentB64 = "${agentB64}"
+    $agentBytes = [Convert]::FromBase64String($agentB64)
+    [System.IO.File]::WriteAllBytes("$INSTALL_DIR\\src\\agent.js", $agentBytes)
+
+    $pkgB64 = "${pkgB64}"
+    $pkgBytes = [Convert]::FromBase64String($pkgB64)
+    [System.IO.File]::WriteAllBytes("$INSTALL_DIR\\package.json", $pkgBytes)
+
+    Write-Host "      Files written." -ForegroundColor Green
+
+    # Step 3 - Write config and install dependencies
+    Write-Host "[3/4] Writing config and installing dependencies..." -ForegroundColor Yellow
     Set-Content "$INSTALL_DIR\\.env" -Encoding UTF8 -Value @(
         "SERVER_URL=$SERVER_URL",
         "AGENT_SECRET=$AGENT_SECRET",
@@ -186,7 +205,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "npm install failed: $npmOut" }
     Write-Host "      Dependencies installed." -ForegroundColor Green
 
-    # Step 4 - Register as scheduled task (runs at startup, visible window)
+    # Step 4 - Register as scheduled task
     Write-Host "[4/4] Registering startup task..." -ForegroundColor Yellow
     Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
 
