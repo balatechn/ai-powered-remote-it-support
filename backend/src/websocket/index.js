@@ -104,6 +104,11 @@ module.exports = function setupSocket(io) {
       }
     });
 
+    // ── Tool result (forward to all browser clients) ───────
+    socket.on('tool:result', (data) => {
+      io.of('/client').emit('tool:result', data);
+    });
+
     // ── Disconnect ─────────────────────────────────────────
     socket.on('disconnect', async () => {
       if (!device) return;
@@ -161,6 +166,23 @@ module.exports = function setupSocket(io) {
         agentSocket.emit('cmd:run', { commandId: log.id, type, command, runAs });
       } catch (err) {
         socket.emit('cmd:error', { error: err.message });
+      }
+    });
+
+    // Browser requests a remote tool → forward to agent
+    socket.on('tool:request', async ({ deviceId, requestId, tool, params }) => {
+      try {
+        const device = await Device.findByPk(deviceId);
+        if (!device || device.status !== 'online') {
+          return socket.emit('tool:result', { requestId, tool, error: 'Device offline or not found' });
+        }
+        const agentSocket = agentNS.sockets.get(device.socket_id);
+        if (!agentSocket) {
+          return socket.emit('tool:result', { requestId, tool, error: 'Agent not connected' });
+        }
+        agentSocket.emit('tool:request', { requestId, tool, params: params || {} });
+      } catch (err) {
+        socket.emit('tool:result', { requestId, tool, error: err.message });
       }
     });
 

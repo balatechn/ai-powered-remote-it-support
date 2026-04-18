@@ -98,6 +98,10 @@ export function useSocket() {
       window.dispatchEvent(new CustomEvent('ws:log:new', { detail: data }));
     });
 
+    socket.on('tool:result', (data) => {
+      window.dispatchEvent(new CustomEvent('ws:tool:result', { detail: data }));
+    });
+
     socket.on('disconnect', () => {
       console.log('[WS] Disconnected');
     });

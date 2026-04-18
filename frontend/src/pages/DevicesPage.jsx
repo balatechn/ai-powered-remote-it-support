@@ -34,6 +34,7 @@ const DROPDOWN_ITEMS = [
   { label: 'Command Prompt', type: 'cmd' },
   { label: 'PowerShell',     type: 'powershell' },
   { divider: true },
+  { label: 'Remote Tools',   type: 'tools' },
   { label: 'View Logs',      type: 'logs' },
 ];
 
@@ -112,7 +113,11 @@ export default function DevicesPage() {
 
   const handleAction = (device, type) => {
     setOpenMenu(null);
-    if (type === 'logs') return navigate('/logs');
+    if (type === 'logs')  return navigate('/logs');
+    if (type === 'tools') {
+      if (device.status !== 'online') return toast.error('Device is offline');
+      return navigate(`/remote/${device.id}`);
+    }
     if (device.status !== 'online') return toast.error('Device is offline');
     navigate(`/terminal/${device.id}?type=${type}`);
   };

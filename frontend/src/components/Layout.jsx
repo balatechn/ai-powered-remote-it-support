@@ -3,8 +3,8 @@ import { Monitor, ScrollText, LogOut, Cpu } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore.js';
 
 const nav = [
-  { to: '/devices', icon: Monitor,    label: 'Devices'  },
-  { to: '/logs',    icon: ScrollText, label: 'Logs'     },
+  { to: '/devices', icon: Monitor,    label: 'Devices' },
+  { to: '/logs',    icon: ScrollText, label: 'Logs'    },
 ];
 
 export default function Layout() {

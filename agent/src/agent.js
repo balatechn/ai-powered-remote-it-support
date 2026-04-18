@@ -12,7 +12,7 @@
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { io }    = require('socket.io-client');
-const { exec }  = require('child_process');
+const { exec, execFileSync } = require('child_process');
 const os        = require('os');
 const si        = require('systeminformation');
 const winston   = require('winston');
@@ -135,6 +135,132 @@ function runCommand(socket, commandId, type, command) {
   });
 }
 
+// ── Remote Tools ──────────────────────────────────────────────
+// Execute a PowerShell script via -EncodedCommand (avoids quoting issues)
+function psExec(script) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return execFileSync(
+    'powershell.exe',
+    ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded],
+    { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
+  ).toString('utf8').trim();
+}
+
+function parseJsonSafe(str) {
+  try {
+    const v = JSON.parse(str);
+    return Array.isArray(v) ? v : (v ? [v] : []);
+  } catch { return []; }
+}
+
+function toolScreenshot() {
+  if (os.platform() !== 'win32') throw new Error('Screenshot is only supported on Windows');
+  const script = `
+    Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+    $ms = New-Object System.IO.MemoryStream
+    $encParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+      [System.Drawing.Imaging.Encoder]::Quality, 70L)
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+      Where-Object { $_.FormatDescription -eq 'JPEG' }
+    $bmp.Save($ms, $codec, $encParams)
+    [Convert]::ToBase64String($ms.ToArray())
+  `;
+  const b64 = psExec(script);
+  return { image: b64, timestamp: new Date().toISOString() };
+}
+
+function toolProcesses() {
+  const script = `
+    @(Get-Process | Sort-Object CPU -Descending | Select-Object -First 150 |
+      Select-Object Id, Name,
+        @{N='CPU';E={[Math]::Round($_.CPU,1)}},
+        @{N='MemMB';E={[Math]::Round($_.WorkingSet64/1MB,1)}},
+        @{N='Path';E={try{$_.Path}catch{''}}} ) |
+    ConvertTo-Json -Compress -Depth 2
+  `;
+  return { processes: parseJsonSafe(psExec(script)) };
+}
+
+function toolKillProcess(pid) {
+  const safePid = parseInt(pid);
+  if (isNaN(safePid)) throw new Error('Invalid PID');
+  psExec(`Stop-Process -Id ${safePid} -Force -ErrorAction Stop`);
+  return { ok: true };
+}
+
+function toolServices() {
+  const script = `
+    @(Get-Service | Select-Object Name, DisplayName,
+        @{N='Status';E={$_.Status.ToString()}},
+        @{N='StartType';E={$_.StartType.ToString()}} |
+      Sort-Object DisplayName) |
+    ConvertTo-Json -Compress -Depth 2
+  `;
+  return { services: parseJsonSafe(psExec(script)) };
+}
+
+function toolServiceControl(name, action) {
+  if (!/^[\w\s\-.]+$/.test(name)) throw new Error('Invalid service name');
+  const cmds = { start: 'Start-Service', stop: 'Stop-Service', restart: 'Restart-Service' };
+  const cmd = cmds[action];
+  if (!cmd) throw new Error(`Unknown action: ${action}`);
+  psExec(`${cmd} -Name '${name}' -Force -ErrorAction Stop`);
+  return { ok: true };
+}
+
+function toolInventory() {
+  const script = `
+    $paths = @(
+      'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+      'HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+    )
+    @(Get-ItemProperty $paths -ErrorAction SilentlyContinue |
+      Where-Object { $_.DisplayName } |
+      Select-Object DisplayName, DisplayVersion, Publisher, InstallDate |
+      Sort-Object DisplayName) |
+    ConvertTo-Json -Compress -Depth 2
+  `;
+  return { software: parseJsonSafe(psExec(script)) };
+}
+
+function toolFileList(dirPath) {
+  const target = dirPath || (os.platform() === 'win32' ? 'C:\\' : '/');
+  const entries = [];
+  const items = fs.readdirSync(target);
+  for (const name of items.slice(0, 500)) {
+    try {
+      const st = fs.statSync(path.join(target, name));
+      entries.push({ name, isDir: st.isDirectory(), size: st.size, modified: st.mtime.toISOString() });
+    } catch { /* skip inaccessible */ }
+  }
+  entries.sort((a, b) => (Number(b.isDir) - Number(a.isDir)) || a.name.localeCompare(b.name));
+  return { path: target, entries };
+}
+
+function toolFileDownload(filePath) {
+  const MAX = 100 * 1024 * 1024;
+  const st = fs.statSync(filePath);
+  if (st.size > MAX) throw new Error('File too large (max 100 MB)');
+  const buf = fs.readFileSync(filePath);
+  return { name: path.basename(filePath), size: st.size, data: buf.toString('base64') };
+}
+
+function toolFileUpload(filePath, b64) {
+  const buf = Buffer.from(b64, 'base64');
+  fs.writeFileSync(filePath, buf);
+  return { ok: true, size: buf.length };
+}
+
+function toolFileDelete(filePath) {
+  fs.unlinkSync(filePath);
+  return { ok: true };
+}
+
 // ── Main ──────────────────────────────────────────────────────
 (async () => {
   const hostname  = os.hostname();
@@ -170,6 +296,32 @@ function runCommand(socket, commandId, type, command) {
 
   socket.on('cmd:run', ({ commandId, type, command, runAs }) => {
     runCommand(socket, commandId, type, command);
+  });
+
+  // ── Remote Tool Requests ────────────────────────────────
+  socket.on('tool:request', async ({ requestId, tool, params }) => {
+    logger.info(`Tool request: ${tool}`);
+    params = params || {};
+    let data, error;
+    try {
+      switch (tool) {
+        case 'screenshot':      data = toolScreenshot();                              break;
+        case 'processes':       data = toolProcesses();                               break;
+        case 'kill':            data = toolKillProcess(params.pid);                   break;
+        case 'services':        data = toolServices();                                break;
+        case 'service:control': data = toolServiceControl(params.name, params.action); break;
+        case 'inventory':       data = toolInventory();                               break;
+        case 'file:list':       data = toolFileList(params.path);                     break;
+        case 'file:download':   data = toolFileDownload(params.path);                 break;
+        case 'file:upload':     data = toolFileUpload(params.path, params.data);      break;
+        case 'file:delete':     data = toolFileDelete(params.path);                   break;
+        default: throw new Error(`Unknown tool: ${tool}`);
+      }
+    } catch (err) {
+      logger.error(`Tool error [${tool}]: ${err.message}`);
+      error = err.message;
+    }
+    socket.emit('tool:result', { requestId, tool, data: data ?? null, error: error ?? null });
   });
 
   socket.on('disconnect', (reason) => {
