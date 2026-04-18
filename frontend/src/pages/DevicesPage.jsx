@@ -64,7 +64,13 @@ export default function DevicesPage() {
 
   // ── WebSocket realtime updates ────────────────────────────
   useEffect(() => {
-    const socket = io(`${SOCKET_URL}/client`, { auth: { token }, transports: ['websocket'] });
+    if (!token) return;
+    const socket = io(`${SOCKET_URL}/client`, {
+      auth: { token },
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionDelay: 3000,
+    });
     socketRef.current = socket;
 
     socket.on('device:online', ({ deviceId }) => {
