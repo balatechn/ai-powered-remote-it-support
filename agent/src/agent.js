@@ -10,7 +10,7 @@
  * - Auto-reconnects on disconnect
  */
 
-require('dotenv').config();
+require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { io }    = require('socket.io-client');
 const { exec }  = require('child_process');
 const os        = require('os');

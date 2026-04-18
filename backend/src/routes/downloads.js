@@ -157,7 +157,8 @@ Write-Host "[4/4] Registering scheduled task..." -ForegroundColor Yellow
 $vbs = "$INSTALL_DIR\\launch.vbs"
 @"
 Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "node $INSTALL_DIR\\src\\agent.js", 0, False
+WshShell.CurrentDirectory = "$INSTALL_DIR"
+WshShell.Run "node src\\agent.js", 0, False
 "@ | Set-Content $vbs -Encoding UTF8
 
 $action    = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "\\"$vbs\\""
