@@ -86,7 +86,7 @@ services:
     networks:
       - nexusit-network
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
       interval: 30s
       timeout: 5s
       retries: 3
