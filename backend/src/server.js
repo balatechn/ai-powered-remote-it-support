@@ -22,6 +22,7 @@ const agentRoutes    = require('./routes/agent');
 const downloadRoutes = require('./routes/downloads');
 
 const app    = express();
+app.set('trust proxy', 1);            // trust first proxy (Coolify/nginx)
 const server = http.createServer(app);
 const io     = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'], credentials: true },
