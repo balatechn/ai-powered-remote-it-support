@@ -109,72 +109,103 @@ router.get('/install-windows.ps1', (req, res) => {
 # Run as Administrator in PowerShell:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex
 
-$SERVER_URL   = "${base}"
-$AGENT_SECRET = Read-Host "Enter AGENT_SECRET"
-$INSTALL_DIR  = "C:\\NexusIT-Agent"
-$TASK_NAME    = "NexusIT-Agent"
+$ErrorActionPreference = "Stop"
+$INSTALL_DIR = "C:\\NexusIT-Agent"
+$TASK_NAME   = "NexusIT-Agent"
+$SERVER_URL  = "${base}"
 
-Write-Host "===============================================" -ForegroundColor Cyan
-Write-Host "  NexusIT Endpoint Agent Installer" -ForegroundColor Cyan
-Write-Host "===============================================" -ForegroundColor Cyan
-
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole("Administrator")) {
-    Write-Host "ERROR: Please run PowerShell as Administrator." -ForegroundColor Red; exit 1
+function Pause-OnExit {
+    Write-Host ""
+    Write-Host "Press Enter to close this window..." -ForegroundColor Gray
+    Read-Host | Out-Null
 }
 
-# Install Node.js if missing
-if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host "[1/4] Downloading Node.js..." -ForegroundColor Yellow
-    $msi = "$env:TEMP\\node.msi"
-    Invoke-WebRequest "https://nodejs.org/dist/v20.18.0/node-v20.18.0-x64.msi" -OutFile $msi
-    Start-Process msiexec -Wait -ArgumentList "/I \\"$msi\\" /quiet"
-    $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine")
-    Write-Host "  Node.js installed." -ForegroundColor Green
-} else {
-    Write-Host "[1/4] Node.js $(node --version) found." -ForegroundColor Green
+try {
+    Write-Host ""
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "  NexusIT Endpoint Agent Installer" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Check admin
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]"Administrator")
+    if (-not $isAdmin) {
+        Write-Host "ERROR: Please close this window and re-run PowerShell as Administrator." -ForegroundColor Red
+        Pause-OnExit; return
+    }
+
+    # Get secret
+    $AGENT_SECRET = Read-Host "Enter AGENT_SECRET"
+    if (-not $AGENT_SECRET) {
+        Write-Host "ERROR: AGENT_SECRET cannot be empty." -ForegroundColor Red
+        Pause-OnExit; return
+    }
+
+    # Step 1 - Node.js
+    Write-Host "[1/4] Checking Node.js..." -ForegroundColor Yellow
+    $nodePath = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodePath) {
+        Write-Host "      Node.js not found. Downloading installer..." -ForegroundColor Yellow
+        $msi = "$env:TEMP\\node-installer.msi"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest "https://nodejs.org/dist/v20.18.0/node-v20.18.0-x64.msi" -OutFile $msi -UseBasicParsing
+        Start-Process msiexec.exe -Wait -ArgumentList "/I \`"$msi\`" /quiet /norestart"
+        $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
+        Write-Host "      Node.js installed." -ForegroundColor Green
+    } else {
+        Write-Host "      Node.js $(node --version) found." -ForegroundColor Green
+    }
+
+    # Step 2 - Create directories and download files
+    Write-Host "[2/4] Downloading agent files..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
+    New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest "$SERVER_URL/downloads/agent.js"           -OutFile "$INSTALL_DIR\\src\\agent.js" -UseBasicParsing
+    Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json"  -UseBasicParsing
+    Write-Host "      Files downloaded." -ForegroundColor Green
+
+    # Step 3 - Write config
+    Write-Host "[3/4] Writing config..." -ForegroundColor Yellow
+    Set-Content "$INSTALL_DIR\\.env" -Encoding UTF8 -Value @(
+        "SERVER_URL=$SERVER_URL",
+        "AGENT_SECRET=$AGENT_SECRET",
+        "HEARTBEAT_INTERVAL=10000"
+    )
+    Set-Location $INSTALL_DIR
+    Write-Host "      Running npm install..." -ForegroundColor Yellow
+    $npmOut = npm install 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "npm install failed: $npmOut" }
+    Write-Host "      Dependencies installed." -ForegroundColor Green
+
+    # Step 4 - Register as scheduled task (runs at startup, visible window)
+    Write-Host "[4/4] Registering startup task..." -ForegroundColor Yellow
+    Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
+
+    $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+    if (-not $nodeExe) { $nodeExe = "node.exe" }
+    $action    = New-ScheduledTaskAction -Execute $nodeExe -Argument "src\\agent.js" -WorkingDirectory $INSTALL_DIR
+    $trigger   = New-ScheduledTaskTrigger -AtStartup
+    $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+    Register-ScheduledTask -TaskName $TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
+    Start-ScheduledTask -TaskName $TASK_NAME
+
+    Write-Host ""
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host "  SUCCESS! Agent installed and started." -ForegroundColor Green
+    Write-Host "  Device will appear in dashboard in ~15s." -ForegroundColor Green
+    Write-Host "  Dashboard: $SERVER_URL" -ForegroundColor Green
+    Write-Host "  Log file:  $INSTALL_DIR\\logs\\agent.log" -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
+
+} catch {
+    Write-Host ""
+    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "Line $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())" -ForegroundColor Red
 }
 
-New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
-New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
-New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
-
-Write-Host "[2/4] Downloading agent files..." -ForegroundColor Yellow
-Invoke-WebRequest "$SERVER_URL/downloads/agent.js"           -OutFile "$INSTALL_DIR\\src\\agent.js"
-Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json"
-Write-Host "  Done." -ForegroundColor Green
-
-Write-Host "[3/4] Writing config..." -ForegroundColor Yellow
-@"
-SERVER_URL=$SERVER_URL
-AGENT_SECRET=$AGENT_SECRET
-HEARTBEAT_INTERVAL=10000
-"@ | Set-Content "$INSTALL_DIR\\.env" -Encoding UTF8
-
-Set-Location $INSTALL_DIR
-npm install | Out-Null
-
-Write-Host "[4/4] Registering scheduled task..." -ForegroundColor Yellow
-$vbs = "$INSTALL_DIR\\launch.vbs"
-@"
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.CurrentDirectory = "$INSTALL_DIR"
-WshShell.Run "node src\\agent.js", 0, False
-"@ | Set-Content $vbs -Encoding UTF8
-
-$action    = New-ScheduledTaskAction -Execute "wscript.exe" -Argument "\\"$vbs\\""
-$trigger   = New-ScheduledTaskTrigger -AtStartup
-$settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1)
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-Unregister-ScheduledTask -TaskName $TASK_NAME -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $TASK_NAME -Action $action -Trigger $trigger -Settings $settings -Principal $principal | Out-Null
-Start-ScheduledTask -TaskName $TASK_NAME
-
-Write-Host ""
-Write-Host "===============================================" -ForegroundColor Green
-Write-Host "  Agent installed and running!" -ForegroundColor Green
-Write-Host "  Device will appear in dashboard within 15s" -ForegroundColor Green
-Write-Host "  Dashboard: $SERVER_URL" -ForegroundColor Green
-Write-Host "===============================================" -ForegroundColor Green
+Pause-OnExit
 `;
 
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
