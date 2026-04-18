@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self'; script-src 'self'">
+  <title>NexusIT Agent — Settings</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <span class="logo">⚡ NexusIT Agent</span>
+    <span class="header-sub">Settings</span>
+  </div>
+
+  <!-- Fields -->
+  <div class="section">
+    <div class="field">
+      <label for="server-url">Server URL</label>
+      <input type="text" id="server-url"
+             placeholder="http://your-server:3080"
+             autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="field">
+      <label for="agent-secret">Agent Secret</label>
+      <input type="password" id="agent-secret"
+             placeholder="Paste your agent secret"
+             autocomplete="off" />
+    </div>
+    <div id="error-msg" class="error-msg" style="display:none"></div>
+  </div>
+
+  <!-- Footer actions -->
+  <div class="footer">
+    <button class="btn btn--secondary" id="btn-cancel">Cancel</button>
+    <button class="btn" id="btn-save">Save &amp; Connect</button>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

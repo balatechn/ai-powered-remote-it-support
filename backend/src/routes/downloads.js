@@ -11,6 +11,15 @@ router.get('/', (req, res) => {
   const proto = req.headers['x-forwarded-proto'] || 'http';
   const host  = req.headers.host || '187.127.134.246:3080';
   const base  = `${proto}://${host}`;
+
+  // Check if EXE installer exists on disk
+  const exeCandidates = [
+    path.join(STATIC_DIR, 'NexusIT-Setup.exe'),
+    path.join(STATIC_DIR, 'NexusIT Agent Setup 1.0.0.exe'),
+    path.resolve(__dirname, '../../../../../electron-agent/dist/NexusIT Agent Setup 1.0.0.exe')
+  ];
+  const exeAvailable = exeCandidates.some(f => fs.existsSync(f));
+
   res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -19,28 +28,49 @@ router.get('/', (req, res) => {
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-  .wrap{max-width:640px;width:100%}
+  .wrap{max-width:660px;width:100%}
   .logo{display:flex;align-items:center;gap:10px;margin-bottom:32px}
   .logo-icon{width:40px;height:40px;background:#6366f1;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px}
   .logo-text{font-size:1.4rem;font-weight:700;color:#fff}
   .logo-text span{color:#818cf8}
   h1{font-size:1.6rem;font-weight:700;color:#fff;margin-bottom:8px}
   .sub{color:#94a3b8;margin-bottom:28px;line-height:1.6}
-  .step{display:flex;gap:14px;margin-bottom:20px;align-items:flex-start}
-  .step-num{min-width:28px;height:28px;background:#6366f1;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#fff;margin-top:2px}
-  .step-body h3{font-size:14px;font-weight:600;color:#e2e8f0;margin-bottom:6px}
-  .step-body p{font-size:13px;color:#94a3b8;margin-bottom:8px;line-height:1.5}
-  .cmd-box{position:relative;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:14px 16px}
-  .cmd-box code{font-family:'Cascadia Code','Consolas',monospace;font-size:12.5px;color:#79c0ff;display:block;white-space:pre-wrap;word-break:break-all;padding-right:56px}
-  .copy-btn{position:absolute;right:10px;top:50%;transform:translateY(-50%);background:#21262d;border:1px solid #30363d;color:#8b949e;font-size:11px;padding:4px 10px;border-radius:6px;cursor:pointer;transition:all .15s}
-  .copy-btn:hover{background:#30363d;color:#e2e8f0}
-  .note{background:#0d2137;border:1px solid #1d4ed8;border-radius:8px;padding:14px 16px;font-size:13px;color:#93c5fd;line-height:1.6;margin-bottom:28px}
-  .note code{background:#1e3a5f;padding:2px 6px;border-radius:4px;font-family:monospace}
-  .download-btn{display:inline-flex;align-items:center;gap:8px;background:#6366f1;color:#fff;text-decoration:none;padding:11px 22px;border-radius:8px;font-size:14px;font-weight:600;transition:background .15s}
-  .download-btn:hover{background:#4f46e5}
-  .divider{border:none;border-top:1px solid #1e293b;margin:28px 0}
-  .back{font-size:13px;color:#64748b;margin-top:20px}
-  .back a{color:#818cf8;text-decoration:none}
+  /* Install options */
+  .options{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:28px}
+  .option{background:#0d1420;border:2px solid #1e293b;border-radius:12px;padding:20px;cursor:default;transition:border-color .15s}
+  .option.recommended{border-color:#6366f1}
+  .option-badge{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#818cf8;margin-bottom:10px}
+  .option h3{font-size:15px;font-weight:700;color:#fff;margin-bottom:6px}
+  .option p{font-size:12px;color:#64748b;line-height:1.6;margin-bottom:16px}
+  .option ul{list-style:none;margin-bottom:16px}
+  .option ul li{font-size:12px;color:#94a3b8;margin-bottom:4px;padding-left:16px;position:relative}
+  .option ul li::before{content:'✓';position:absolute;left:0;color:#4ade80}
+  .dl-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;text-decoration:none;transition:all .15s;width:100%;text-align:center}
+  .dl-btn--primary{background:#6366f1;color:#fff}
+  .dl-btn--primary:hover{background:#4f46e5}
+  .dl-btn--secondary{background:#1e293b;color:#94a3b8;border:1px solid #334155}
+  .dl-btn--secondary:hover{background:#273548;color:#e2e8f0}
+  .dl-btn--unavail{background:#0d1117;color:#475569;border:1px solid #1e293b;cursor:not-allowed;opacity:0.6}
+  /* Advanced section */
+  details{margin-top:8px}
+  summary{font-size:13px;color:#475569;cursor:pointer;user-select:none;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:'▶ '}
+  details[open] summary::before{content:'▼ '}
+  summary:hover{color:#94a3b8}
+  .adv-inner{margin-top:16px;padding-top:16px;border-top:1px solid #1e293b}
+  .step{display:flex;gap:14px;margin-bottom:18px;align-items:flex-start}
+  .step-num{min-width:26px;height:26px;background:#334155;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#94a3b8;margin-top:2px}
+  .step-body h4{font-size:13px;font-weight:600;color:#e2e8f0;margin-bottom:5px}
+  .step-body p{font-size:12px;color:#64748b;margin-bottom:8px;line-height:1.5}
+  .cmd-box{position:relative;background:#0d1117;border:1px solid #1e293b;border-radius:8px;padding:12px 14px}
+  .cmd-box code{font-family:'Cascadia Code','Consolas',monospace;font-size:11.5px;color:#79c0ff;display:block;white-space:pre-wrap;word-break:break-all;padding-right:50px}
+  .copy-btn{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:#1e293b;border:1px solid #334155;color:#64748b;font-size:10px;padding:3px 8px;border-radius:5px;cursor:pointer;transition:all .15s}
+  .copy-btn:hover{background:#334155;color:#e2e8f0}
+  .note{background:#0d1a2a;border:1px solid #1e3a5f;border-radius:8px;padding:12px 14px;font-size:12px;color:#93c5fd;line-height:1.6;margin-bottom:20px}
+  .note code{background:#1e3a5f;padding:1px 5px;border-radius:3px;font-family:monospace}
+  .back{font-size:12px;color:#334155;margin-top:24px}
+  .back a{color:#6366f1;text-decoration:none}
   .back a:hover{text-decoration:underline}
 </style>
 </head>
@@ -54,44 +84,75 @@ router.get('/', (req, res) => {
   <h1>Install Endpoint Agent</h1>
   <p class="sub">Connect this machine to your NexusIT dashboard for remote management, terminal access, and real-time monitoring.</p>
 
-  <div class="note">
-    <strong>You need the AGENT_SECRET</strong> — ask your administrator or run this on the server:<br>
-    <code>grep AGENT_SECRET /opt/nexusit/.env</code>
-  </div>
+  <div class="options">
+    <!-- EXE installer -->
+    <div class="option recommended">
+      <div class="option-badge">⭐ Recommended</div>
+      <h3>Windows Setup (.exe)</h3>
+      <p>One-click visual installer with system-tray app. Shows connection status &amp; live stats.</p>
+      <ul>
+        <li>Double-click to install</li>
+        <li>System-tray icon (green/red/yellow)</li>
+        <li>Live CPU, RAM &amp; disk stats</li>
+        <li>Auto-starts at login</li>
+      </ul>
+      ${exeAvailable
+        ? `<a class="dl-btn dl-btn--primary" href="/downloads/NexusIT-Setup.exe">⬇ Download NexusIT-Setup.exe</a>`
+        : `<span class="dl-btn dl-btn--unavail">⬇ Installer not yet available</span>`
+      }
+    </div>
 
-  <div class="step">
-    <div class="step-num">1</div>
-    <div class="step-body">
-      <h3>Open PowerShell as Administrator</h3>
-      <p>Right-click the Start menu → <strong>Windows PowerShell (Admin)</strong> or <strong>Terminal (Admin)</strong></p>
+    <!-- PS1 installer -->
+    <div class="option">
+      <div class="option-badge">Advanced</div>
+      <h3>PowerShell Script</h3>
+      <p>Silent background agent. Ideal for servers, mass deployment, or headless machines.</p>
+      <ul>
+        <li>Runs as SYSTEM service</li>
+        <li>No GUI required</li>
+        <li>Suitable for scripted rollout</li>
+        <li>Works on all Windows versions</li>
+      </ul>
+      <a class="dl-btn dl-btn--secondary" href="/downloads/install-windows.ps1" download>⬇ Download install-windows.ps1</a>
     </div>
   </div>
 
-  <div class="step">
-    <div class="step-num">2</div>
-    <div class="step-body">
-      <h3>Run the installer</h3>
-      <p>Paste and run this one-line command:</p>
-      <div class="cmd-box">
-        <code id="cmd">Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex</code>
-        <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
+  <details>
+    <summary>PowerShell one-liner (run directly without downloading)</summary>
+    <div class="adv-inner">
+      <div class="note">
+        You need the <strong>AGENT_SECRET</strong> — ask your administrator or run on the server:<br>
+        <code>grep AGENT_SECRET /opt/nexusit/.env</code>
+      </div>
+
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h4>Open PowerShell as Administrator</h4>
+          <p>Right-click the Start menu → <strong>Windows PowerShell (Admin)</strong> or <strong>Terminal (Admin)</strong></p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h4>Run the installer command</h4>
+          <div class="cmd-box">
+            <code id="cmd">Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex</code>
+            <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h4>Enter the AGENT_SECRET when prompted</h4>
+          <p>The agent will install, configure itself, and connect automatically.</p>
+        </div>
       </div>
     </div>
-  </div>
-
-  <div class="step">
-    <div class="step-num">3</div>
-    <div class="step-body">
-      <h3>Enter the AGENT_SECRET when prompted</h3>
-      <p>The agent will install, configure itself, and connect to the dashboard automatically.</p>
-    </div>
-  </div>
-
-  <hr class="divider">
-
-  <a class="download-btn" href="/downloads/install-windows.ps1" download>
-    ⬇ Download install-windows.ps1
-  </a>
+  </details>
 
   <p class="back">← <a href="${base}">Back to NexusIT Dashboard</a></p>
 </div>
@@ -276,7 +337,9 @@ router.get('/agent-package.json', (_req, res) => {
 // ── GET /downloads/NexusIT-Setup.exe ──────────────────────
 router.get('/NexusIT-Setup.exe', (req, res) => {
   const candidates = [
-    path.join(STATIC_DIR, 'NexusIT Setup 1.0.0.exe'),
+    path.join(STATIC_DIR, 'NexusIT-Setup.exe'),
+    path.join(STATIC_DIR, 'NexusIT Agent Setup 1.0.0.exe'),
+    path.resolve(__dirname, '../../../../../electron-agent/dist/NexusIT Agent Setup 1.0.0.exe'),
     path.resolve(__dirname, '../../../../electron/dist/NexusIT Setup 1.0.0.exe')
   ];
   for (const f of candidates) {

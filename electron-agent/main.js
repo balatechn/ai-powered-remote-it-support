@@ -1,0 +1,428 @@
+'use strict';
+/**
+ * NexusIT Electron Tray Agent — Main Process
+ *
+ * Runs as a persistent system-tray application.
+ * Tray icon: green (connected) / yellow (connecting) / red (disconnected)
+ * Left-click  → Status window
+ * Right-click → Context menu (Status, Settings, Logs, Reconnect, Exit)
+ */
+
+const {
+  app, BrowserWindow, Tray, Menu, ipcMain,
+  nativeImage, shell
+} = require('electron');
+const path    = require('path');
+const fs      = require('fs');
+const os      = require('os');
+const zlib    = require('zlib');
+const { io }  = require('socket.io-client');
+const { exec } = require('child_process');
+const si       = require('systeminformation');
+const winston  = require('winston');
+
+// ── Single instance ────────────────────────────────────────
+if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+
+// ── Paths ──────────────────────────────────────────────────
+const CONFIG_DIR  = app.getPath('userData');
+const CONFIG_FILE = path.join(CONFIG_DIR, '.env');
+const LOG_DIR     = path.join(CONFIG_DIR, 'logs');
+
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
+
+// ── Logger ─────────────────────────────────────────────────
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+    winston.format.printf(({ timestamp, level, message }) =>
+      `${timestamp} [${level.toUpperCase()}] ${message}`)
+  ),
+  transports: [
+    new winston.transports.File({
+      filename: path.join(LOG_DIR, 'agent.log'),
+      maxsize: 5242880,
+      maxFiles: 3
+    })
+  ]
+});
+
+// ── Config ─────────────────────────────────────────────────
+function readConfig() {
+  if (!fs.existsSync(CONFIG_FILE)) return {};
+  const cfg = {};
+  for (const line of fs.readFileSync(CONFIG_FILE, 'utf8').split('\n')) {
+    const m = line.match(/^([^#=][^=]*)=(.*)$/);
+    if (m) cfg[m[1].trim()] = m[2].trim();
+  }
+  return cfg;
+}
+
+function writeConfig({ serverUrl, agentSecret }) {
+  fs.writeFileSync(
+    CONFIG_FILE,
+    `SERVER_URL=${serverUrl}\nAGENT_SECRET=${agentSecret}\nHEARTBEAT_INTERVAL=10000\n`,
+    'utf8'
+  );
+}
+
+// ── PNG Icon Generator (no external deps) ─────────────────
+function crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    c ^= buf[i];
+    for (let j = 0; j < 8; j++) c = (c & 1) ? (c >>> 1) ^ 0xEDB88320 : c >>> 1;
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const t = Buffer.from(type, 'ascii');
+  const len = Buffer.allocUnsafe(4); len.writeUInt32BE(data.length);
+  const crcBuf = Buffer.allocUnsafe(4);
+  crcBuf.writeUInt32BE(crc32(Buffer.concat([t, data])));
+  return Buffer.concat([len, t, data, crcBuf]);
+}
+
+function makePNG(size, r, g, b) {
+  const rows = [];
+  for (let y = 0; y < size; y++) {
+    const row = [0]; // filter byte = None
+    for (let x = 0; x < size; x++) {
+      const cx = (size - 1) / 2, cy = (size - 1) / 2;
+      const radius = size / 2 - 1.5;
+      const dx = x - cx, dy = y - cy;
+      const alpha = (dx * dx + dy * dy <= radius * radius) ? 255 : 0;
+      row.push(r, g, b, alpha);
+    }
+    rows.push(Buffer.from(row));
+  }
+  const compressed = zlib.deflateSync(Buffer.concat(rows));
+  const ihdr = Buffer.allocUnsafe(13);
+  ihdr.writeUInt32BE(size, 0); ihdr.writeUInt32BE(size, 4);
+  ihdr.writeUInt8(8, 8); ihdr.writeUInt8(6, 9); // 8-bit RGBA
+  ihdr.writeUInt8(0, 10); ihdr.writeUInt8(0, 11); ihdr.writeUInt8(0, 12);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', compressed),
+    pngChunk('IEND', Buffer.alloc(0))
+  ]);
+}
+
+// ── App State ──────────────────────────────────────────────
+let tray            = null;
+let statusWin       = null;
+let settingsWin     = null;
+let socket          = null;
+let agentStatus     = 'disconnected'; // 'connected' | 'connecting' | 'disconnected'
+let lastStats       = null;
+let lastHeartbeat   = null;
+let heartbeatTimer  = null;
+let iconConnected, iconDisconnected, iconConnecting;
+
+// ── System Info ────────────────────────────────────────────
+function getLocalIp() {
+  const ifaces = os.networkInterfaces();
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+let _osVersion = os.release();
+si.osInfo()
+  .then(i => { _osVersion = (`${i.distro} ${i.release}`).trim() || os.release(); })
+  .catch(() => {});
+
+async function getStats() {
+  try {
+    const [cpu, mem, disk] = await Promise.all([
+      si.currentLoad(), si.mem(), si.fsSize()
+    ]);
+    const mainDisk = disk.find(d => d.mount === 'C:' || d.mount === '/') || disk[0];
+    return {
+      cpu:    Math.round(cpu.currentLoad * 10) / 10,
+      memory: Math.round(((mem.total - mem.available) / mem.total) * 1000) / 10,
+      disk:   mainDisk ? Math.round((mainDisk.used / mainDisk.size) * 1000) / 10 : 0,
+      users:  (await si.users()).map(u => u.user).filter(Boolean)
+    };
+  } catch {
+    return { cpu: 0, memory: 0, disk: 0, users: [] };
+  }
+}
+
+function getStatusPayload() {
+  const config = readConfig();
+  return {
+    hostname:      os.hostname(),
+    platform:      os.platform(),
+    osVersion:     _osVersion,
+    localIp:       getLocalIp(),
+    serverUrl:     config.SERVER_URL || 'Not configured',
+    status:        agentStatus,
+    lastHeartbeat: lastHeartbeat ? lastHeartbeat.toLocaleTimeString() : null,
+    version:       app.getVersion(),
+    stats:         lastStats,
+    logDir:        LOG_DIR
+  };
+}
+
+// ── Agent WebSocket ────────────────────────────────────────
+function startAgent() {
+  const config = readConfig();
+
+  if (!config.SERVER_URL || !config.AGENT_SECRET) {
+    logger.warn('No config — opening settings');
+    agentStatus = 'disconnected';
+    updateTray();
+    // Delay to ensure app is fully ready
+    setTimeout(openSettings, 500);
+    return;
+  }
+
+  if (socket) { socket.removeAllListeners(); socket.disconnect(); socket = null; }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+
+  agentStatus = 'connecting';
+  updateTray();
+
+  logger.info(`Connecting to ${config.SERVER_URL}`);
+
+  socket = io(`${config.SERVER_URL}/agent`, {
+    auth: {
+      secret:       config.AGENT_SECRET,
+      hostname:     os.hostname(),
+      platform:     os.platform(),
+      osVersion:    _osVersion,
+      localIp:      getLocalIp(),
+      agentVersion: app.getVersion()
+    },
+    reconnection:         true,
+    reconnectionDelay:    3000,
+    reconnectionDelayMax: 30000,
+    transports: ['websocket']
+  });
+
+  socket.on('connect', async () => {
+    logger.info(`Connected (id: ${socket.id})`);
+    agentStatus = 'connected';
+    updateTray();
+    pushStatus();
+
+    const beat = async () => {
+      lastStats = await getStats();
+      socket.emit('heartbeat', lastStats);
+      lastHeartbeat = new Date();
+      pushStatus();
+    };
+    beat();
+    heartbeatTimer = setInterval(beat, parseInt(config.HEARTBEAT_INTERVAL || '10000'));
+  });
+
+  socket.on('cmd:run', ({ commandId, type, command }) => {
+    runCommand(commandId, type, command);
+  });
+
+  socket.on('disconnect', reason => {
+    logger.warn(`Disconnected: ${reason}`);
+    agentStatus = 'disconnected';
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    updateTray();
+    pushStatus();
+  });
+
+  socket.on('connect_error', err => {
+    logger.error(`Connect error: ${err.message}`);
+    agentStatus = 'connecting';
+    updateTray();
+    pushStatus();
+  });
+
+  socket.on('reconnect', n => {
+    logger.info(`Reconnected after ${n} attempt(s)`);
+    agentStatus = 'connected';
+    updateTray();
+    pushStatus();
+  });
+}
+
+function stopAgent() {
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (socket) { socket.removeAllListeners(); socket.disconnect(); socket = null; }
+  agentStatus = 'disconnected';
+  updateTray();
+  pushStatus();
+}
+
+// ── Command Execution ──────────────────────────────────────
+function runCommand(commandId, type, command) {
+  const cmd = type === 'powershell'
+    ? `powershell -NonInteractive -Command "${command.replace(/"/g, '\\"')}"`
+    : process.platform === 'win32' ? `cmd /c ${command}` : command;
+
+  logger.info(`[${type}] ${command}`);
+  const t0 = Date.now();
+  let out = '';
+
+  const child = exec(cmd, { timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+  const emit = chunk => {
+    out += chunk;
+    socket?.emit('cmd:output', { commandId, chunk });
+  };
+  child.stdout?.on('data', emit);
+  child.stderr?.on('data', emit);
+  child.on('close', code => {
+    socket?.emit('cmd:output', {
+      commandId, chunk: '', done: true,
+      exitCode: code ?? 0, output: out, durationMs: Date.now() - t0
+    });
+    logger.info(`Done in ${Date.now() - t0}ms exit=${code}`);
+  });
+  child.on('error', err => {
+    socket?.emit('cmd:output', {
+      commandId, chunk: `\nError: ${err.message}`, done: true,
+      exitCode: 1, output: out + `\nError: ${err.message}`, durationMs: Date.now() - t0
+    });
+    logger.error(`Command error: ${err.message}`);
+  });
+}
+
+// ── Tray ───────────────────────────────────────────────────
+function updateTray() {
+  if (!tray) return;
+
+  const icons  = { connected: iconConnected, connecting: iconConnecting, disconnected: iconDisconnected };
+  const tips   = {
+    connected:    'NexusIT Agent — Connected',
+    connecting:   'NexusIT Agent — Connecting...',
+    disconnected: 'NexusIT Agent — Disconnected'
+  };
+  const labels = {
+    connected:    '● Connected',
+    connecting:   '◌ Connecting...',
+    disconnected: '○ Disconnected'
+  };
+
+  tray.setImage(icons[agentStatus] || iconDisconnected);
+  tray.setToolTip(tips[agentStatus] || 'NexusIT Agent');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'NexusIT Agent',          enabled: false },
+    { label: labels[agentStatus],      enabled: false },
+    { type: 'separator' },
+    { label: 'Open Status...',         click: openStatus },
+    { label: 'Settings...',            click: openSettings },
+    { label: 'View Logs...',           click: () => shell.openPath(LOG_DIR) },
+    { label: 'Reconnect',              click: () => { stopAgent(); setTimeout(startAgent, 500); } },
+    { type: 'separator' },
+    { label: 'Exit',                   click: () => { app.isQuitting = true; app.quit(); } }
+  ]));
+}
+
+function pushStatus() {
+  if (statusWin && !statusWin.isDestroyed()) {
+    statusWin.webContents.send('status-update', getStatusPayload());
+  }
+}
+
+// ── Windows ────────────────────────────────────────────────
+function openStatus() {
+  if (statusWin && !statusWin.isDestroyed()) { statusWin.focus(); return; }
+  statusWin = new BrowserWindow({
+    width: 440, height: 530,
+    resizable: false,
+    backgroundColor: '#0f172a',
+    title: 'NexusIT Agent',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  statusWin.setMenuBarVisibility(false);
+  statusWin.loadFile(path.join(__dirname, 'renderer', 'status.html'));
+  statusWin.on('closed', () => { statusWin = null; });
+  statusWin.webContents.on('did-finish-load', () => {
+    statusWin.webContents.send('status-update', getStatusPayload());
+  });
+}
+
+function openSettings() {
+  if (settingsWin && !settingsWin.isDestroyed()) { settingsWin.focus(); return; }
+  settingsWin = new BrowserWindow({
+    width: 440, height: 290,
+    resizable: false,
+    backgroundColor: '#0f172a',
+    title: 'NexusIT Agent — Settings',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  settingsWin.setMenuBarVisibility(false);
+  settingsWin.loadFile(path.join(__dirname, 'renderer', 'settings.html'));
+  settingsWin.on('closed', () => { settingsWin = null; });
+  settingsWin.webContents.on('did-finish-load', () => {
+    const cfg = readConfig();
+    settingsWin.webContents.send('settings-data', {
+      serverUrl:   cfg.SERVER_URL   || '',
+      agentSecret: cfg.AGENT_SECRET || ''
+    });
+  });
+}
+
+// ── IPC Handlers ───────────────────────────────────────────
+ipcMain.handle('get-status',    ()        => getStatusPayload());
+ipcMain.handle('get-settings',  ()        => {
+  const c = readConfig();
+  return { serverUrl: c.SERVER_URL || '', agentSecret: c.AGENT_SECRET || '' };
+});
+ipcMain.handle('open-dashboard', ()       => {
+  const c = readConfig();
+  if (c.SERVER_URL) shell.openExternal(c.SERVER_URL);
+});
+ipcMain.handle('open-logs',     ()        => shell.openPath(LOG_DIR));
+ipcMain.handle('reconnect',     ()        => { stopAgent(); setTimeout(startAgent, 500); });
+ipcMain.handle('save-settings', (_, data) => {
+  const { serverUrl, agentSecret } = data;
+  if (!serverUrl?.trim())    throw new Error('Server URL is required');
+  if (!agentSecret?.trim())  throw new Error('Agent Secret is required');
+  writeConfig({ serverUrl: serverUrl.trim(), agentSecret: agentSecret.trim() });
+  logger.info(`Config saved — server: ${serverUrl.trim()}`);
+  stopAgent();
+  setTimeout(startAgent, 500);
+  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.close();
+  return { ok: true };
+});
+
+// ── App Lifecycle ──────────────────────────────────────────
+app.whenReady().then(() => {
+  if (process.platform === 'win32') {
+    app.setAppUserModelId('com.nexusit.agent');
+  }
+
+  // Register auto-start at Windows login
+  app.setLoginItemSettings({ openAtLogin: true, name: 'NexusIT Agent' });
+
+  // Build tray icons using inline PNG generator
+  iconConnected    = nativeImage.createFromBuffer(makePNG(32, 34,  197, 94));  // #22c55e green
+  iconDisconnected = nativeImage.createFromBuffer(makePNG(32, 239, 68,  68));  // #ef4444 red
+  iconConnecting   = nativeImage.createFromBuffer(makePNG(32, 234, 179, 8));   // #eab308 yellow
+
+  // Create system tray
+  tray = new Tray(iconDisconnected);
+  tray.on('click',        openStatus);
+  tray.on('double-click', openStatus);
+  updateTray();
+
+  // Start the agent
+  startAgent();
+});
+
+app.on('second-instance', () => { openStatus(); });
+app.on('window-all-closed', () => { /* stay in tray */ });
+app.on('before-quit', () => { stopAgent(); });
