@@ -158,11 +158,17 @@ try {
 
     # Step 2 - Create directories and download files
     Write-Host "[2/4] Downloading agent files..." -ForegroundColor Yellow
+    if (Test-Path $INSTALL_DIR) { Remove-Item -Recurse -Force $INSTALL_DIR }
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest "$SERVER_URL/downloads/agent.js"           -OutFile "$INSTALL_DIR\\src\\agent.js" -UseBasicParsing
     Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json"  -UseBasicParsing
+    # Validate downloaded package.json is real JSON
+    $pkgContent = Get-Content "$INSTALL_DIR\\package.json" -Raw
+    try { $null = $pkgContent | ConvertFrom-Json } catch {
+        throw "Downloaded package.json is not valid JSON. Server returned: $($pkgContent.Substring(0, [Math]::Min(300, $pkgContent.Length)))"
+    }
     Write-Host "      Files downloaded." -ForegroundColor Green
 
     # Step 3 - Write config
