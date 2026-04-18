@@ -114,6 +114,10 @@ $INSTALL_DIR = "C:\\NexusIT-Agent"
 $TASK_NAME   = "NexusIT-Agent"
 $SERVER_URL  = "${base}"
 
+# Bypass system proxy so Invoke-WebRequest connects directly to the server
+[System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
 function Pause-OnExit {
     Write-Host ""
     Write-Host "Press Enter to close this window..." -ForegroundColor Gray
@@ -147,7 +151,6 @@ try {
     if (-not $nodePath) {
         Write-Host "      Node.js not found. Downloading installer..." -ForegroundColor Yellow
         $msi = "$env:TEMP\\node-installer.msi"
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest "https://nodejs.org/dist/v20.18.0/node-v20.18.0-x64.msi" -OutFile $msi -UseBasicParsing
         Start-Process msiexec.exe -Wait -ArgumentList "/I \`"$msi\`" /quiet /norestart"
         $env:PATH = [Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [Environment]::GetEnvironmentVariable("PATH","User")
@@ -161,7 +164,6 @@ try {
     if (Test-Path $INSTALL_DIR) { Remove-Item -Recurse -Force $INSTALL_DIR }
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest "$SERVER_URL/downloads/agent.js"           -OutFile "$INSTALL_DIR\\src\\agent.js" -UseBasicParsing
     Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json"  -UseBasicParsing
     # Validate downloaded package.json is real JSON
