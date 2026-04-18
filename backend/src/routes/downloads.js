@@ -138,7 +138,7 @@ router.get('/', (req, res) => {
         <div class="step-body">
           <h4>Run the installer command</h4>
           <div class="cmd-box">
-            <code id="cmd">Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex</code>
+            <code id="cmd">$f="$env:TEMP\\nxit.ps1"; iwr ${base}/downloads/install-windows.ps1 -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f; Remove-Item $f -Force</code>
             <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
           </div>
         </div>
@@ -166,29 +166,9 @@ router.get('/install-windows.ps1', (req, res) => {
   const host  = req.headers.host || '187.127.134.246:3080';
   const base  = `${proto}://${host}`;
 
-  // Embed agent.js and package.json as base64 to avoid secondary HTTP downloads
-  // (which may be blocked by transparent proxies on client networks)
-  const agentCandidates = [
-    '/opt/nexusit/agent/src/agent.js',
-    path.resolve(__dirname, '../../../../agent/src/agent.js')
-  ];
-  let agentB64 = '';
-  for (const f of agentCandidates) {
-    if (fs.existsSync(f)) { agentB64 = fs.readFileSync(f).toString('base64'); break; }
-  }
-  const pkgJson = JSON.stringify({
-    name: 'nexusit-agent', version: '1.0.0', main: 'src/agent.js',
-    scripts: { start: 'node src/agent.js' },
-    dependencies: {
-      dotenv: '^16.4.5', 'socket.io-client': '^4.8.0',
-      systeminformation: '^5.23.5', uuid: '^10.0.0', winston: '^3.14.2'
-    }
-  });
-  const pkgB64 = Buffer.from(pkgJson).toString('base64');
-
   const script = `# NexusIT Endpoint Agent Installer - Windows
-# Run as Administrator in PowerShell:
-#   Set-ExecutionPolicy Bypass -Scope Process -Force; iwr ${base}/downloads/install-windows.ps1 | iex
+# Save to file and run as Administrator:
+#   $f="$env:TEMP\\nxit.ps1"; iwr ${base}/downloads/install-windows.ps1 -OutFile $f -UseBasicParsing; powershell -ExecutionPolicy Bypass -File $f; Remove-Item $f -Force
 
 $ErrorActionPreference = "Stop"
 $INSTALL_DIR = "C:\\NexusIT-Agent"
@@ -237,21 +217,17 @@ try {
         Write-Host "      Node.js $(node --version) found." -ForegroundColor Green
     }
 
-    # Step 2 - Write agent files (embedded in this script - no HTTP downloads needed)
-    Write-Host "[2/4] Writing agent files..." -ForegroundColor Yellow
+    # Step 2 - Download agent files from server
+    Write-Host "[2/4] Downloading agent files..." -ForegroundColor Yellow
     if (Test-Path $INSTALL_DIR) { Remove-Item -Recurse -Force $INSTALL_DIR }
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\src"  | Out-Null
     New-Item -ItemType Directory -Force -Path "$INSTALL_DIR\\logs" | Out-Null
 
-    $agentB64 = "${agentB64}"
-    $agentBytes = [Convert]::FromBase64String($agentB64)
-    [System.IO.File]::WriteAllBytes("$INSTALL_DIR\\src\\agent.js", $agentBytes)
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest "$SERVER_URL/downloads/agent.js" -OutFile "$INSTALL_DIR\\src\\agent.js" -UseBasicParsing
+    Invoke-WebRequest "$SERVER_URL/downloads/agent-package.json" -OutFile "$INSTALL_DIR\\package.json" -UseBasicParsing
 
-    $pkgB64 = "${pkgB64}"
-    $pkgBytes = [Convert]::FromBase64String($pkgB64)
-    [System.IO.File]::WriteAllBytes("$INSTALL_DIR\\package.json", $pkgBytes)
-
-    Write-Host "      Files written." -ForegroundColor Green
+    Write-Host "      Files downloaded." -ForegroundColor Green
 
     # Step 3 - Write config and install dependencies
     Write-Host "[3/4] Writing config and installing dependencies..." -ForegroundColor Yellow
