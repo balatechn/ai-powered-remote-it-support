@@ -20,6 +20,7 @@ const commandRoutes  = require('./routes/commands');
 const logRoutes      = require('./routes/logs');
 const agentRoutes    = require('./routes/agent');
 const downloadRoutes = require('./routes/downloads');
+const userRoutes     = require('./routes/users');
 
 const app    = express();
 app.set('trust proxy', 1);            // trust first proxy (Coolify/nginx)
@@ -45,6 +46,7 @@ app.use('/api/devices',  deviceRoutes);
 app.use('/api/commands', commandRoutes);
 app.use('/api/logs',     logRoutes);
 app.use('/api/agent',    agentRoutes);
+app.use('/api/users',    userRoutes);
 app.use('/downloads',    downloadRoutes);
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', uptime: Math.floor(process.uptime()) }));

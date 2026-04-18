@@ -6,6 +6,7 @@ import DevicesPage from './pages/DevicesPage.jsx';
 import TerminalPage from './pages/TerminalPage.jsx';
 import LogsPage from './pages/LogsPage.jsx';
 import RemoteToolsPage from './pages/RemoteToolsPage.jsx';
+import UsersPage from './pages/UsersPage.jsx';
 
 function PrivateRoute({ children }) {
   const token = useAuthStore(s => s.token);
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="terminal/:deviceId" element={<TerminalPage />} />
         <Route path="remote/:deviceId" element={<RemoteToolsPage />} />
         <Route path="logs" element={<LogsPage />} />
+        <Route path="users" element={<UsersPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

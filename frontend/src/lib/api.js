@@ -17,4 +17,13 @@ api.interceptors.response.use(
   }
 );
 
+export const usersAPI = {
+  getAll:         ()           => api.get('/users'),
+  create:         (data)       => api.post('/users', data),
+  update:         (id, data)   => api.put(`/users/${id}`, data),
+  delete:         (id)         => api.delete(`/users/${id}`),
+  resetPassword:  (id, data)   => api.post(`/users/${id}/reset-password`, data),
+  changePassword: (data)       => api.post('/users/me/change-password', data),
+};
+
 export default api;

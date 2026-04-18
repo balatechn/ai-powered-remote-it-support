@@ -1,5 +1,5 @@
 import { Outlet, NavLink, useNavigate } from 'react-router-dom';
-import { Monitor, ScrollText, LogOut, Cpu } from 'lucide-react';
+import { Monitor, ScrollText, LogOut, Cpu, Users } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore.js';
 
 const nav = [
@@ -7,9 +7,14 @@ const nav = [
   { to: '/logs',    icon: ScrollText, label: 'Logs'    },
 ];
 
+const adminNav = [
+  { to: '/users', icon: Users, label: 'Users' },
+];
+
 export default function Layout() {
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
+  const isAdmin = user?.role === 'admin';
 
   const handleLogout = () => { logout(); navigate('/login'); };
 
@@ -43,6 +48,28 @@ export default function Layout() {
               {label}
             </NavLink>
           ))}
+
+          {isAdmin && (
+            <>
+              <div className="pt-3 pb-1 px-3 text-xs text-gray-600 uppercase tracking-wider font-medium">Admin</div>
+              {adminNav.map(({ to, icon: Icon, label }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                      isActive
+                        ? 'bg-indigo-600 text-white'
+                        : 'text-gray-400 hover:text-white hover:bg-gray-800'
+                    }`
+                  }
+                >
+                  <Icon size={17} />
+                  {label}
+                </NavLink>
+              ))}
+            </>
+          )}
         </nav>
 
         {/* User */}
