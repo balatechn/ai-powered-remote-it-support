@@ -1,18 +1,16 @@
 # =============================================
-# AI-Powered Remote IT Support Platform
-# Docker Compose Configuration
+# NexusIT Remote IT Support Platform
 # =============================================
 
 version: '3.8'
 
 services:
-  # ─── PostgreSQL Database ──────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: nexusit-db
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${DB_NAME:-ai_it_support}
+      POSTGRES_DB: ${DB_NAME:-nexusit}
       POSTGRES_USER: ${DB_USER:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
     volumes:
@@ -65,11 +63,12 @@ services:
       REDIS_PORT: 6379
       JWT_SECRET: ${JWT_SECRET:-change_this_jwt_secret_in_production}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change_this_refresh_secret}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AGENT_SECRET: ${AGENT_SECRET:-change_this_agent_secret}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      DOWNLOADS_DIR: /opt/nexusit/downloads-static
     volumes:
       - ./agent:/opt/nexusit/agent:ro
+      - /opt/nexusit/downloads-static:/opt/nexusit/downloads-static:ro
     networks:
       - nexusit-network
 
@@ -92,8 +91,6 @@ services:
       timeout: 5s
       retries: 3
 
-  # guacd and guacamole commented out — require DB schema init before use
-  # Add back with proper initdb.sql initialization
 
 volumes:
   postgres_data:
