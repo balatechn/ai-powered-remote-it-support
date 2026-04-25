@@ -31,7 +31,8 @@
       "createStartMenuShortcut": true,
       "menuCategory": "NexusIT",
       "runAfterFinish": true,
-      "shortcutName": "NexusIT Agent"
+      "shortcutName": "NexusIT Agent",
+      "include": "build/installer.nsh"
     }
   },
   "dependencies": {
