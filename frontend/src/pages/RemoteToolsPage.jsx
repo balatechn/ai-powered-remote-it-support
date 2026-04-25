@@ -669,25 +669,34 @@ function FilesTab({ sendTool, online }) {
 }
 
 // ── Remote View Tab ────────────────────────────────────────────
-function RemoteViewTab({ socket, deviceId, online }) {
+function RemoteViewTab({ socket, socketRef, deviceId, online }) {
   const [streaming, setStreaming]       = useState(false);
   const [quality, setQuality]           = useState(50);
   const [fps, setFps]                   = useState(2);
   const [inputEnabled, setInputEnabled] = useState(false);
   const [actualFps, setActualFps]       = useState(0);
   const [frameInfo, setFrameInfo]       = useState(null);
+  const [noFrameWarning, setNoFrameWarning] = useState(false);
   const imgRef         = useRef(null);
   const frameCountRef  = useRef(0);
   const lastFpsTimeRef = useRef(Date.now());
   const frameDimsRef   = useRef({ width: 1920, height: 1080 });
   const movThrottleRef = useRef(null);
   const streamingRef   = useRef(false);
+  const noFrameTimerRef = useRef(null);
+  const firstFrameRef  = useRef(false);
 
   // Receive frames
   useEffect(() => {
     if (!socket) return;
     const handler = (data) => {
       if (String(data.deviceId) !== String(deviceId)) return;
+      // Got first frame — clear the no-frame warning timer
+      if (!firstFrameRef.current) {
+        firstFrameRef.current = true;
+        setNoFrameWarning(false);
+        if (noFrameTimerRef.current) { clearTimeout(noFrameTimerRef.current); noFrameTimerRef.current = null; }
+      }
       if (imgRef.current) imgRef.current.src = `data:image/jpeg;base64,${data.image}`;
       if (data.width && data.height) {
         frameDimsRef.current = { width: data.width, height: data.height };
@@ -709,45 +718,62 @@ function RemoteViewTab({ socket, deviceId, online }) {
   // Stop on unmount
   useEffect(() => {
     return () => {
-      if (socket && streamingRef.current) socket.emit('rdview:stop', { deviceId });
+      if (noFrameTimerRef.current) clearTimeout(noFrameTimerRef.current);
+      const sock = socket || socketRef?.current;
+      if (sock && streamingRef.current) sock.emit('rdview:stop', { deviceId });
     };
-  }, [socket, deviceId]);
+  }, [socket, socketRef, deviceId]);
 
   const startStream = () => {
-    if (!socket) return;
-    socket.emit('rdview:start', { deviceId, quality, fps });
+    // Use socketRef as fallback in case liveSocket state hasn't updated yet
+    const sock = socket || socketRef?.current;
+    if (!sock) return;
+    sock.emit('rdview:start', { deviceId, quality, fps });
     setStreaming(true);
     streamingRef.current = true;
     setActualFps(0);
+    setNoFrameWarning(false);
+    firstFrameRef.current = false;
     frameCountRef.current = 0;
     lastFpsTimeRef.current = Date.now();
+    // Warn after 12s if no frame received
+    if (noFrameTimerRef.current) clearTimeout(noFrameTimerRef.current);
+    noFrameTimerRef.current = setTimeout(() => {
+      if (!firstFrameRef.current) setNoFrameWarning(true);
+    }, 12000);
   };
 
   const stopStream = () => {
-    if (!socket) return;
-    socket.emit('rdview:stop', { deviceId });
+    const sock = socket || socketRef?.current;
+    if (sock) sock.emit('rdview:stop', { deviceId });
     setStreaming(false);
     streamingRef.current = false;
     setActualFps(0);
+    setNoFrameWarning(false);
+    if (noFrameTimerRef.current) { clearTimeout(noFrameTimerRef.current); noFrameTimerRef.current = null; }
     if (imgRef.current) imgRef.current.removeAttribute('src');
   };
 
   const handleMouseDown = (e) => {
-    if (!inputEnabled || !socket) return;
+    if (!inputEnabled) return;
     e.preventDefault();
+    const sock = socket || socketRef?.current;
+    if (!sock) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round((e.clientX - rect.left) / rect.width  * frameDimsRef.current.width);
     const y = Math.round((e.clientY - rect.top)  / rect.height * frameDimsRef.current.height);
-    socket.emit('rdview:input', { deviceId, type: 'click', x, y, button: e.button === 2 ? 'right' : 'left' });
+    sock.emit('rdview:input', { deviceId, type: 'click', x, y, button: e.button === 2 ? 'right' : 'left' });
   };
 
   const handleMouseMove = (e) => {
-    if (!inputEnabled || !socket || movThrottleRef.current) return;
+    if (!inputEnabled || movThrottleRef.current) return;
+    const sock = socket || socketRef?.current;
+    if (!sock) return;
     movThrottleRef.current = setTimeout(() => { movThrottleRef.current = null; }, 80);
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round((e.clientX - rect.left) / rect.width  * frameDimsRef.current.width);
     const y = Math.round((e.clientY - rect.top)  / rect.height * frameDimsRef.current.height);
-    socket.emit('rdview:input', { deviceId, type: 'mousemove', x, y });
+    sock.emit('rdview:input', { deviceId, type: 'mousemove', x, y });
   };
 
   return (
@@ -817,6 +843,22 @@ function RemoteViewTab({ socket, deviceId, online }) {
               </span>
             )}
           </div>
+          {noFrameWarning && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3">
+              <AlertCircle size={36} className="text-yellow-400" />
+              <p className="text-white font-semibold">No frames received from agent</p>
+              <p className="text-gray-400 text-sm text-center max-w-sm">
+                The agent on this device may be outdated and does not support Remote View.
+              </p>
+              <a
+                href="/downloads/NexusIT-Setup.exe"
+                className="mt-1 inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors"
+              >
+                <Download size={14} /> Download latest agent
+              </a>
+              <p className="text-xs text-gray-600">Install on the remote machine, then try again</p>
+            </div>
+          )}
           {inputEnabled && (
             <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-xs bg-black/70 text-yellow-400 px-3 py-1 rounded-full pointer-events-none">
               Input Active — clicks affect the remote screen
@@ -852,6 +894,8 @@ export default function RemoteToolsPage() {
     socketRef.current = socket;
 
     socket.on('connect', () => setLiveSocket(socket));
+    // Fix race condition: if socket already connected by the time listener registered
+    if (socket.connected) setLiveSocket(socket);
 
     socket.on('tool:result', (result) => {
       const pending = pendingRef.current[result.requestId];
@@ -940,7 +984,7 @@ export default function RemoteToolsPage() {
           {tab === 2 && <ServicesTab sendTool={sendTool} online={online} />}
           {tab === 3 && <InventoryTab sendTool={sendTool} online={online} />}
           {tab === 4 && <FilesTab sendTool={sendTool} online={online} />}
-          {tab === 5 && <RemoteViewTab socket={liveSocket} deviceId={deviceId} online={online} />}
+          {tab === 5 && <RemoteViewTab socket={liveSocket} socketRef={socketRef} deviceId={deviceId} online={online} />}
         </div>
       </div>
     </div>
