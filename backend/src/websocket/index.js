@@ -34,6 +34,7 @@ module.exports = function setupSocket(io) {
     // Register / update device in DB
     const osMap = { win32: 'windows', darwin: 'macos', linux: 'linux' };
     let device;
+    let lastHbWrite = 0;   // throttle DB writes — broadcast every beat, persist every 60s
     try {
       const [dev] = await Device.findOrCreate({
         where: { hostname: info.hostname },
@@ -69,6 +70,22 @@ module.exports = function setupSocket(io) {
     // ── Heartbeat ──────────────────────────────────────────
     socket.on('heartbeat', async (data) => {
       if (!device) return;
+
+      // Always broadcast real-time stats to all browser clients
+      io.of('/client').emit('device:heartbeat', {
+        deviceId:      device.id,
+        cpu_usage:     data.cpu,
+        memory_usage:  data.memory,
+        disk_usage:    data.disk,
+        active_users:  data.users,
+        last_heartbeat: new Date()
+      });
+
+      // Throttle DB writes: persist at most once every 60 seconds
+      const now = Date.now();
+      if (now - lastHbWrite < 60000) return;
+      lastHbWrite = now;
+
       try {
         await device.update({
           last_heartbeat: new Date(),
@@ -77,14 +94,6 @@ module.exports = function setupSocket(io) {
           disk_usage:    data.disk ?? null,
           active_users:  data.users ?? [],
           status:        'online'
-        });
-        io.of('/client').emit('device:heartbeat', {
-          deviceId:     device.id,
-          cpu_usage:    data.cpu,
-          memory_usage: data.memory,
-          disk_usage:   data.disk,
-          active_users: data.users,
-          last_heartbeat: new Date()
         });
       } catch (err) { /* ignore */ }
     });

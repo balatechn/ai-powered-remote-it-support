@@ -37,7 +37,7 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json({ limit: '2mb' }));
-app.use(morgan('dev', { stream: { write: m => logger.info(m.trim()) } }));
+app.use(morgan('tiny', { stream: { write: m => logger.info(m.trim()) } }));
 app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, max: 1000 }));
 
 // ── Routes ─────────────────────────────────────────────────
@@ -61,8 +61,22 @@ const PORT = parseInt(process.env.PORT || '4000');
 (async () => {
   try {
     await sequelize.authenticate();
-    await sequelize.sync({ alter: true });
+    await sequelize.sync();                   // no alter — fast, safe
     logger.info('Database ready');
+
+    // Ensure performance indexes exist (idempotent)
+    const indexes = [
+      `CREATE INDEX IF NOT EXISTS idx_syslog_device   ON system_logs(device_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_syslog_created  ON system_logs("createdAt" DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_syslog_level    ON system_logs(level)`,
+      `CREATE INDEX IF NOT EXISTS idx_cmdlog_device   ON command_logs(device_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_cmdlog_created  ON command_logs("createdAt" DESC)`,
+    ];
+    for (const sql of indexes) {
+      try { await sequelize.query(sql); } catch { /* skip if already exists */ }
+    }
+    logger.info('Indexes verified');
+
     setupSocket(io);
     server.listen(PORT, () => logger.info(`NexusIT backend on :${PORT}`));
   } catch (err) {

@@ -17,7 +17,7 @@ const fs      = require('fs');
 const os      = require('os');
 const zlib    = require('zlib');
 const { io }  = require('socket.io-client');
-const { exec } = require('child_process');
+const { exec, execFileSync, spawn } = require('child_process');
 const si       = require('systeminformation');
 const winston  = require('winston');
 
@@ -109,6 +109,192 @@ function makePNG(size, r, g, b) {
     pngChunk('IDAT', compressed),
     pngChunk('IEND', Buffer.alloc(0))
   ]);
+}
+
+// ── Remote Tools ──────────────────────────────────────────
+function psExec(script) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return execFileSync(
+    'powershell.exe',
+    ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded],
+    { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
+  ).toString('utf8').trim();
+}
+
+function parseJsonSafe(str) {
+  try { const v = JSON.parse(str); return Array.isArray(v) ? v : (v ? [v] : []); }
+  catch { return []; }
+}
+
+function toolScreenshot() {
+  const script = `
+    Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
+    $ms = New-Object System.IO.MemoryStream
+    $ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+      [System.Drawing.Imaging.Encoder]::Quality, 70L)
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+      Where-Object { $_.FormatDescription -eq 'JPEG' }
+    $bmp.Save($ms, $codec, $ep)
+    [Convert]::ToBase64String($ms.ToArray())
+  `;
+  return { image: psExec(script), timestamp: new Date().toISOString() };
+}
+
+function toolProcesses() {
+  const script = `@(Get-Process | Sort-Object CPU -Descending | Select-Object -First 150 |
+    Select-Object Id, Name,
+      @{N='CPU';E={[Math]::Round($_.CPU,1)}},
+      @{N='MemMB';E={[Math]::Round($_.WorkingSet64/1MB,1)}},
+      @{N='Path';E={try{$_.Path}catch{''}}}) | ConvertTo-Json -Compress -Depth 2`;
+  return { processes: parseJsonSafe(psExec(script)) };
+}
+
+function toolKillProcess(pid) {
+  const safePid = parseInt(pid);
+  if (isNaN(safePid)) throw new Error('Invalid PID');
+  psExec(`Stop-Process -Id ${safePid} -Force -ErrorAction Stop`);
+  return { ok: true };
+}
+
+function toolServices() {
+  const script = `@(Get-Service | Select-Object Name, DisplayName,
+    @{N='Status';E={$_.Status.ToString()}},
+    @{N='StartType';E={$_.StartType.ToString()}} |
+    Sort-Object DisplayName) | ConvertTo-Json -Compress -Depth 2`;
+  return { services: parseJsonSafe(psExec(script)) };
+}
+
+function toolServiceControl(name, action) {
+  if (!/^[\w\s\-.]+$/.test(name)) throw new Error('Invalid service name');
+  const cmds = { start: 'Start-Service', stop: 'Stop-Service', restart: 'Restart-Service' };
+  const cmd = cmds[action];
+  if (!cmd) throw new Error(`Unknown action: ${action}`);
+  psExec(`${cmd} -Name '${name}' -Force -ErrorAction Stop`);
+  return { ok: true };
+}
+
+function toolInventory() {
+  const script = `$p=@('HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*','HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*');@(Get-ItemProperty $p -EA SilentlyContinue|Where-Object{$_.DisplayName}|Select-Object DisplayName,DisplayVersion,Publisher,InstallDate|Sort-Object DisplayName)|ConvertTo-Json -Compress -Depth 2`;
+  return { software: parseJsonSafe(psExec(script)) };
+}
+
+function toolFileList(dirPath) {
+  const target = dirPath || 'C:\\';
+  const entries = [];
+  for (const name of fs.readdirSync(target).slice(0, 500)) {
+    try {
+      const st = fs.statSync(path.join(target, name));
+      entries.push({ name, isDir: st.isDirectory(), size: st.size, modified: st.mtime.toISOString() });
+    } catch { /* skip */ }
+  }
+  entries.sort((a, b) => (Number(b.isDir) - Number(a.isDir)) || a.name.localeCompare(b.name));
+  return { path: target, entries };
+}
+
+function toolFileDownload(filePath) {
+  const st = fs.statSync(filePath);
+  if (st.size > 100 * 1024 * 1024) throw new Error('File too large (max 100 MB)');
+  return { name: path.basename(filePath), size: st.size, data: fs.readFileSync(filePath).toString('base64') };
+}
+
+function toolFileUpload(filePath, b64) {
+  const buf = Buffer.from(b64, 'base64');
+  fs.writeFileSync(filePath, buf);
+  return { ok: true, size: buf.length };
+}
+
+function toolFileDelete(filePath) { fs.unlinkSync(filePath); return { ok: true }; }
+
+// ── Remote Desktop Streaming ───────────────────────────────
+let rdviewProc = null;
+let inputProc  = null;
+
+function getInputProc() {
+  if (inputProc && !inputProc.killed) return inputProc;
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Input {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+    public const uint LDN=0x0002u, LUP=0x0004u, RDN=0x0008u, RUP=0x0010u;
+}
+"@
+\$r = [Console]::In
+while (\$true) {
+    \$l = \$r.ReadLine()
+    if (\$null -eq \$l) { break }
+    \$p = \$l.Trim().Split(' ')
+    switch (\$p[0]) {
+        'MOVE'   { [Win32Input]::SetCursorPos([int]\$p[1],[int]\$p[2])|Out-Null }
+        'LCLICK' { [Win32Input]::SetCursorPos([int]\$p[1],[int]\$p[2])|Out-Null; [Win32Input]::mouse_event([Win32Input]::LDN,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 30; [Win32Input]::mouse_event([Win32Input]::LUP,0,0,0,[UIntPtr]::Zero) }
+        'RCLICK' { [Win32Input]::SetCursorPos([int]\$p[1],[int]\$p[2])|Out-Null; [Win32Input]::mouse_event([Win32Input]::RDN,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 30; [Win32Input]::mouse_event([Win32Input]::RUP,0,0,0,[UIntPtr]::Zero) }
+        'KEY'    { if (\$p[1]) { [System.Windows.Forms.SendKeys]::SendWait(\$p[1]) } }
+    }
+}`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  inputProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
+    stdio: ['pipe', 'ignore', 'pipe']
+  });
+  inputProc.on('close', () => { inputProc = null; });
+  inputProc.on('error', () => { inputProc = null; });
+  return inputProc;
+}
+
+function startRdview(sock, quality, fps) {
+  if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+  const intervalMs = Math.max(200, Math.round(1000 / Math.min(fps || 2, 10)));
+  const qual = Math.max(10, Math.min(100, quality || 50));
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+\$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{\$_.FormatDescription -eq 'JPEG'}
+\$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+\$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,${qual}L)
+while (\$true) {
+  try {
+    \$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    \$bmp=New-Object System.Drawing.Bitmap(\$b.Width,\$b.Height)
+    \$g=[System.Drawing.Graphics]::FromImage(\$bmp)
+    \$g.CopyFromScreen(0,0,0,0,\$bmp.Size)
+    \$ms=New-Object System.IO.MemoryStream
+    \$bmp.Save(\$ms,\$codec,\$ep)
+    \$b64=[Convert]::ToBase64String(\$ms.ToArray())
+    \$g.Dispose();\$bmp.Dispose();\$ms.Dispose()
+    [Console]::WriteLine(\$b.Width.ToString()+','+\$b.Height.ToString()+','+\$b64)
+    [Console]::Out.Flush()
+  } catch { [Console]::Error.WriteLine(\$_.Exception.Message) }
+  Start-Sleep -Milliseconds ${intervalMs}
+}`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let buf = '';
+  rdviewProc.stdout.on('data', chunk => {
+    buf += chunk.toString();
+    let idx;
+    while ((idx = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
+      if (!line) continue;
+      const c1 = line.indexOf(','), c2 = line.indexOf(',', c1 + 1);
+      if (c1 < 0 || c2 < 0) continue;
+      const w = parseInt(line.slice(0, c1)), h = parseInt(line.slice(c1 + 1, c2));
+      const img = line.slice(c2 + 1);
+      if (!img || isNaN(w) || isNaN(h)) continue;
+      sock.emit('rdview:frame', { image: img, width: w, height: h, ts: Date.now() });
+    }
+  });
+  rdviewProc.stderr?.on('data', d => logger.warn(`rdview: ${d.toString().trim()}`));
+  rdviewProc.on('close', () => { rdviewProc = null; });
+  rdviewProc.on('error', () => { rdviewProc = null; });
+  logger.info(`rdview started — ${fps} fps, quality ${qual}%`);
 }
 
 // ── App State ──────────────────────────────────────────────
@@ -227,6 +413,50 @@ function startAgent() {
     runCommand(commandId, type, command);
   });
 
+  // ── Remote Tools ──────────────────────────────────────────
+  socket.on('tool:request', async ({ requestId, tool, params }) => {
+    params = params || {};
+    let data, error;
+    try {
+      switch (tool) {
+        case 'screenshot':      data = toolScreenshot();                              break;
+        case 'processes':       data = toolProcesses();                               break;
+        case 'kill':            data = toolKillProcess(params.pid);                   break;
+        case 'services':        data = toolServices();                                break;
+        case 'service:control': data = toolServiceControl(params.name, params.action); break;
+        case 'inventory':       data = toolInventory();                               break;
+        case 'file:list':       data = toolFileList(params.path);                     break;
+        case 'file:download':   data = toolFileDownload(params.path);                 break;
+        case 'file:upload':     data = toolFileUpload(params.path, params.data);      break;
+        case 'file:delete':     data = toolFileDelete(params.path);                   break;
+        default: throw new Error(`Unknown tool: ${tool}`);
+      }
+    } catch (err) {
+      logger.error(`Tool error [${tool}]: ${err.message}`);
+      error = err.message;
+    }
+    socket.emit('tool:result', { requestId, tool, data: data ?? null, error: error ?? null });
+  });
+
+  socket.on('rdview:start', ({ quality, fps } = {}) => {
+    startRdview(socket, quality, fps);
+  });
+
+  socket.on('rdview:stop', () => {
+    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+  });
+
+  socket.on('rdview:input', ({ type, x, y, button, key } = {}) => {
+    try {
+      const proc = getInputProc();
+      if (!proc || proc.killed) return;
+      const xi = Math.round(Number(x)), yi = Math.round(Number(y));
+      if (type === 'mousemove')    proc.stdin.write(`MOVE ${xi} ${yi}\n`);
+      else if (type === 'click')   proc.stdin.write(`${button === 'right' ? 'RCLICK' : 'LCLICK'} ${xi} ${yi}\n`);
+      else if (type === 'key' && key) proc.stdin.write(`KEY ${key}\n`);
+    } catch (err) { logger.error(`rdview:input error: ${err.message}`); inputProc = null; }
+  });
+
   socket.on('disconnect', reason => {
     logger.warn(`Disconnected: ${reason}`);
     agentStatus = 'disconnected';
@@ -252,6 +482,8 @@ function startAgent() {
 
 function stopAgent() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+  if (inputProc)  { inputProc.kill();  inputProc  = null; }
   if (socket) { socket.removeAllListeners(); socket.disconnect(); socket = null; }
   agentStatus = 'disconnected';
   updateTray();
