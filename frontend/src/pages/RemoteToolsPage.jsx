@@ -9,7 +9,7 @@ import {
   ChevronLeft, Camera, RefreshCw, Cpu, Layers,
   Package, FolderOpen, Trash2, Upload, Download,
   Play, Square, RotateCcw, Search, ChevronRight,
-  Loader2, AlertCircle, Home, FileText, Folder
+  Loader2, AlertCircle, Home, FileText, Folder, Monitor
 } from 'lucide-react';
 import api from '../lib/api.js';
 import { useAuthStore } from '../stores/authStore.js';
@@ -22,6 +22,7 @@ const TABS = [
   { label: 'Services',    icon: Layers },
   { label: 'Inventory',   icon: Package },
   { label: 'Files',       icon: FolderOpen },
+  { label: 'Remote View', icon: Monitor },
 ];
 
 function makeId() {
@@ -667,6 +668,166 @@ function FilesTab({ sendTool, online }) {
   );
 }
 
+// ── Remote View Tab ────────────────────────────────────────────
+function RemoteViewTab({ socket, deviceId, online }) {
+  const [streaming, setStreaming]       = useState(false);
+  const [quality, setQuality]           = useState(50);
+  const [fps, setFps]                   = useState(2);
+  const [inputEnabled, setInputEnabled] = useState(false);
+  const [actualFps, setActualFps]       = useState(0);
+  const [frameInfo, setFrameInfo]       = useState(null);
+  const imgRef         = useRef(null);
+  const frameCountRef  = useRef(0);
+  const lastFpsTimeRef = useRef(Date.now());
+  const frameDimsRef   = useRef({ width: 1920, height: 1080 });
+  const movThrottleRef = useRef(null);
+  const streamingRef   = useRef(false);
+
+  // Receive frames
+  useEffect(() => {
+    if (!socket) return;
+    const handler = (data) => {
+      if (String(data.deviceId) !== String(deviceId)) return;
+      if (imgRef.current) imgRef.current.src = `data:image/jpeg;base64,${data.image}`;
+      if (data.width && data.height) {
+        frameDimsRef.current = { width: data.width, height: data.height };
+        setFrameInfo(fi => (fi?.width === data.width && fi?.height === data.height) ? fi : { width: data.width, height: data.height });
+      }
+      frameCountRef.current++;
+      const now = Date.now();
+      const elapsed = (now - lastFpsTimeRef.current) / 1000;
+      if (elapsed >= 2) {
+        setActualFps(Math.round(frameCountRef.current / elapsed));
+        frameCountRef.current = 0;
+        lastFpsTimeRef.current = now;
+      }
+    };
+    socket.on('rdview:frame', handler);
+    return () => socket.off('rdview:frame', handler);
+  }, [socket, deviceId]);
+
+  // Stop on unmount
+  useEffect(() => {
+    return () => {
+      if (socket && streamingRef.current) socket.emit('rdview:stop', { deviceId });
+    };
+  }, [socket, deviceId]);
+
+  const startStream = () => {
+    if (!socket) return;
+    socket.emit('rdview:start', { deviceId, quality, fps });
+    setStreaming(true);
+    streamingRef.current = true;
+    setActualFps(0);
+    frameCountRef.current = 0;
+    lastFpsTimeRef.current = Date.now();
+  };
+
+  const stopStream = () => {
+    if (!socket) return;
+    socket.emit('rdview:stop', { deviceId });
+    setStreaming(false);
+    streamingRef.current = false;
+    setActualFps(0);
+    if (imgRef.current) imgRef.current.removeAttribute('src');
+  };
+
+  const handleMouseDown = (e) => {
+    if (!inputEnabled || !socket) return;
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.round((e.clientX - rect.left) / rect.width  * frameDimsRef.current.width);
+    const y = Math.round((e.clientY - rect.top)  / rect.height * frameDimsRef.current.height);
+    socket.emit('rdview:input', { deviceId, type: 'click', x, y, button: e.button === 2 ? 'right' : 'left' });
+  };
+
+  const handleMouseMove = (e) => {
+    if (!inputEnabled || !socket || movThrottleRef.current) return;
+    movThrottleRef.current = setTimeout(() => { movThrottleRef.current = null; }, 80);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = Math.round((e.clientX - rect.left) / rect.width  * frameDimsRef.current.width);
+    const y = Math.round((e.clientY - rect.top)  / rect.height * frameDimsRef.current.height);
+    socket.emit('rdview:input', { deviceId, type: 'mousemove', x, y });
+  };
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Controls */}
+      <div className="flex items-center justify-between mb-4 flex-shrink-0">
+        <div>
+          <h2 className="text-white font-semibold">Remote View</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {frameInfo ? `${frameInfo.width}\u00d7${frameInfo.height}` : 'Live screen streaming'}
+            {streaming && ` \u2022 ${actualFps} fps`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {!streaming && <>
+            <label className="text-xs text-gray-500">Quality</label>
+            <select value={quality} onChange={e => setQuality(+e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value={30}>Low (30%)</option>
+              <option value={50}>Med (50%)</option>
+              <option value={75}>High (75%)</option>
+            </select>
+            <label className="text-xs text-gray-500">FPS</label>
+            <select value={fps} onChange={e => setFps(+e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-indigo-500">
+              <option value={1}>1 fps</option>
+              <option value={2}>2 fps</option>
+              <option value={5}>5 fps</option>
+            </select>
+          </>}
+          {streaming && (
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
+              <input type="checkbox" checked={inputEnabled} onChange={e => setInputEnabled(e.target.checked)}
+                className="accent-indigo-500 cursor-pointer" />
+              Enable Input
+            </label>
+          )}
+          {!streaming
+            ? <Btn onClick={startStream} disabled={!online || !socket}><Monitor size={14} /> Start Streaming</Btn>
+            : <Btn onClick={stopStream} variant="danger"><Square size={14} /> Stop</Btn>
+          }
+        </div>
+      </div>
+
+      {!streaming ? (
+        <div className="flex flex-col items-center justify-center flex-1 rounded-xl border border-gray-800 text-gray-600">
+          <Monitor size={48} className="mb-3 opacity-20" />
+          <p className="text-sm">Click "Start Streaming" to view the remote screen live</p>
+          <p className="text-xs mt-1.5 text-gray-700">First frame may take a few seconds while the agent loads display libraries</p>
+        </div>
+      ) : (
+        <div
+          className={`relative flex-1 rounded-xl overflow-hidden border border-gray-700 bg-black min-h-0 ${inputEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onContextMenu={e => e.preventDefault()}
+        >
+          <img ref={imgRef} className="w-full h-full object-contain" alt="Remote screen" draggable={false} />
+          <div className="absolute top-2 left-2 flex items-center gap-1.5 pointer-events-none">
+            <span className="flex items-center gap-1 text-xs bg-black/70 text-green-400 px-2 py-0.5 rounded-full">
+              <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse inline-block" />
+              Live
+            </span>
+            {frameInfo && (
+              <span className="text-xs bg-black/70 text-gray-400 px-2 py-0.5 rounded-full">
+                {frameInfo.width}&times;{frameInfo.height} &bull; {actualFps} fps
+              </span>
+            )}
+          </div>
+          {inputEnabled && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-xs bg-black/70 text-yellow-400 px-3 py-1 rounded-full pointer-events-none">
+              Input Active — clicks affect the remote screen
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────────────
 export default function RemoteToolsPage() {
   const { deviceId } = useParams();
@@ -675,6 +836,7 @@ export default function RemoteToolsPage() {
 
   const [device, setDevice] = useState(null);
   const [tab, setTab] = useState(0);
+  const [liveSocket, setLiveSocket] = useState(null);
 
   const socketRef  = useRef(null);
   const pendingRef = useRef({});
@@ -688,6 +850,8 @@ export default function RemoteToolsPage() {
   useEffect(() => {
     const socket = io(`${SOCKET_URL}/client`, { auth: { token }, transports: ['websocket'] });
     socketRef.current = socket;
+
+    socket.on('connect', () => setLiveSocket(socket));
 
     socket.on('tool:result', (result) => {
       const pending = pendingRef.current[result.requestId];
@@ -776,6 +940,7 @@ export default function RemoteToolsPage() {
           {tab === 2 && <ServicesTab sendTool={sendTool} online={online} />}
           {tab === 3 && <InventoryTab sendTool={sendTool} online={online} />}
           {tab === 4 && <FilesTab sendTool={sendTool} online={online} />}
+          {tab === 5 && <RemoteViewTab socket={liveSocket} deviceId={deviceId} online={online} />}
         </div>
       </div>
     </div>

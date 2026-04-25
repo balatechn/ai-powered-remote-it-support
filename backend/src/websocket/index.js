@@ -108,7 +108,11 @@ module.exports = function setupSocket(io) {
     socket.on('tool:result', (data) => {
       io.of('/client').emit('tool:result', data);
     });
-
+    // ── Remote View frame (forward to all browser clients) ───
+    socket.on('rdview:frame', (data) => {
+      if (!device) return;
+      io.of('/client').emit('rdview:frame', { ...data, deviceId: device.id });
+    });
     // ── Disconnect ─────────────────────────────────────────
     socket.on('disconnect', async () => {
       if (!device) return;
@@ -184,6 +188,37 @@ module.exports = function setupSocket(io) {
       } catch (err) {
         socket.emit('tool:result', { requestId, tool, error: err.message });
       }
+    });
+
+    // Browser controls remote view streaming
+    socket.on('rdview:start', async ({ deviceId, quality, fps }) => {
+      try {
+        const device = await Device.findByPk(deviceId);
+        if (!device || device.status !== 'online') return;
+        const agentSocket = agentNS.sockets.get(device.socket_id);
+        if (!agentSocket) return;
+        agentSocket.emit('rdview:start', { quality: quality || 50, fps: fps || 2 });
+      } catch (err) { /* ignore */ }
+    });
+
+    socket.on('rdview:stop', async ({ deviceId }) => {
+      try {
+        const device = await Device.findByPk(deviceId);
+        if (!device) return;
+        const agentSocket = agentNS.sockets.get(device.socket_id);
+        if (!agentSocket) return;
+        agentSocket.emit('rdview:stop', {});
+      } catch (err) { /* ignore */ }
+    });
+
+    socket.on('rdview:input', async ({ deviceId, type, x, y, button, key }) => {
+      try {
+        const device = await Device.findByPk(deviceId);
+        if (!device || device.status !== 'online') return;
+        const agentSocket = agentNS.sockets.get(device.socket_id);
+        if (!agentSocket) return;
+        agentSocket.emit('rdview:input', { type, x, y, button, key });
+      } catch (err) { /* ignore */ }
     });
 
     socket.on('disconnect', () => logger.info('Client disconnected', { user: socket.user?.email }));

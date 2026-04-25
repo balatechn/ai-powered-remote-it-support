@@ -12,7 +12,7 @@
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { io }    = require('socket.io-client');
-const { exec, execFileSync } = require('child_process');
+const { exec, execFileSync, spawn } = require('child_process');
 const os        = require('os');
 const si        = require('systeminformation');
 const winston   = require('winston');
@@ -261,6 +261,54 @@ function toolFileDelete(filePath) {
   return { ok: true };
 }
 
+// ── Remote Desktop Streaming ──────────────────────────────────
+let rdviewProc = null;
+let inputProc  = null;
+
+function getInputProc() {
+  if (inputProc && !inputProc.killed) return inputProc;
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class Win32Input {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
+    public const uint LDN=0x0002u, LUP=0x0004u, RDN=0x0008u, RUP=0x0010u;
+}
+"@
+\$r = [Console]::In
+while (\$true) {
+    \$l = \$r.ReadLine()
+    if (\$null -eq \$l) { break }
+    \$p = \$l.Trim().Split(' ')
+    switch (\$p[0]) {
+        'MOVE'   { [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null }
+        'LCLICK' {
+            [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null
+            [Win32Input]::mouse_event([Win32Input]::LDN, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 30
+            [Win32Input]::mouse_event([Win32Input]::LUP, 0, 0, 0, [UIntPtr]::Zero)
+        }
+        'RCLICK' {
+            [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null
+            [Win32Input]::mouse_event([Win32Input]::RDN, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds 30
+            [Win32Input]::mouse_event([Win32Input]::RUP, 0, 0, 0, [UIntPtr]::Zero)
+        }
+        'KEY'    { if (\$p[1]) { [System.Windows.Forms.SendKeys]::SendWait(\$p[1]) } }
+    }
+}`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  inputProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
+    stdio: ['pipe', 'ignore', 'pipe']
+  });
+  inputProc.on('close',  ()    => { inputProc = null; });
+  inputProc.on('error',  (err) => { logger.error(`inputProc error: ${err.message}`); inputProc = null; });
+  return inputProc;
+}
+
 // ── Main ──────────────────────────────────────────────────────
 (async () => {
   const hostname  = os.hostname();
@@ -281,6 +329,12 @@ function toolFileDelete(filePath) {
   });
 
   let heartbeatTimer = null;
+
+  // Clean up streaming processes on exit
+  process.on('exit', () => {
+    if (rdviewProc) rdviewProc.kill();
+    if (inputProc)  inputProc.kill();
+  });
 
   socket.on('connect', async () => {
     logger.info(`Connected to server (socket: ${socket.id})`);
@@ -324,9 +378,89 @@ function toolFileDelete(filePath) {
     socket.emit('tool:result', { requestId, tool, data: data ?? null, error: error ?? null });
   });
 
+  // ── Remote Desktop Streaming ────────────────────────────
+  socket.on('rdview:start', ({ quality = 50, fps = 2 } = {}) => {
+    if (os.platform() !== 'win32') return;
+    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    const intervalMs = Math.max(200, Math.round(1000 / Math.min(fps, 10)));
+    const qual = Math.max(10, Math.min(100, quality));
+    const script = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+\$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { \$_.FormatDescription -eq 'JPEG' }
+\$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+\$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, ${qual}L)
+while (\$true) {
+  try {
+    \$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    \$bmp = New-Object System.Drawing.Bitmap(\$b.Width, \$b.Height)
+    \$g = [System.Drawing.Graphics]::FromImage(\$bmp)
+    \$g.CopyFromScreen(0, 0, 0, 0, \$bmp.Size)
+    \$ms = New-Object System.IO.MemoryStream
+    \$bmp.Save(\$ms, \$codec, \$ep)
+    \$b64 = [Convert]::ToBase64String(\$ms.ToArray())
+    \$g.Dispose(); \$bmp.Dispose(); \$ms.Dispose()
+    [Console]::WriteLine(\$b.Width.ToString() + ',' + \$b.Height.ToString() + ',' + \$b64)
+    [Console]::Out.Flush()
+  } catch { [Console]::Error.WriteLine(\$_.Exception.Message) }
+  Start-Sleep -Milliseconds ${intervalMs}
+}`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let buf = '';
+    rdviewProc.stdout.on('data', chunk => {
+      buf += chunk.toString();
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line) continue;
+        const c1 = line.indexOf(',');
+        const c2 = line.indexOf(',', c1 + 1);
+        if (c1 < 0 || c2 < 0) continue;
+        const w = parseInt(line.slice(0, c1));
+        const h = parseInt(line.slice(c1 + 1, c2));
+        const img = line.slice(c2 + 1);
+        if (!img || isNaN(w) || isNaN(h)) continue;
+        socket.emit('rdview:frame', { image: img, width: w, height: h, ts: Date.now() });
+      }
+    });
+    rdviewProc.stderr?.on('data', d => logger.warn(`rdview: ${d.toString().trim()}`));
+    rdviewProc.on('close', () => { rdviewProc = null; logger.info('rdview process exited'); });
+    rdviewProc.on('error', err => { logger.error(`rdview spawn error: ${err.message}`); rdviewProc = null; });
+    logger.info(`rdview started — ${fps} fps, quality ${qual}%`);
+  });
+
+  socket.on('rdview:stop', () => {
+    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    logger.info('rdview stopped');
+  });
+
+  socket.on('rdview:input', ({ type, x, y, button, key } = {}) => {
+    if (os.platform() !== 'win32') return;
+    try {
+      const proc = getInputProc();
+      if (!proc || proc.killed) return;
+      const xi = Math.round(Number(x)), yi = Math.round(Number(y));
+      if (type === 'mousemove') {
+        proc.stdin.write(`MOVE ${xi} ${yi}\n`);
+      } else if (type === 'click') {
+        const cmd = button === 'right' ? 'RCLICK' : 'LCLICK';
+        proc.stdin.write(`${cmd} ${xi} ${yi}\n`);
+      } else if (type === 'key' && key) {
+        proc.stdin.write(`KEY ${key}\n`);
+      }
+    } catch (err) {
+      logger.error(`rdview:input error: ${err.message}`);
+      inputProc = null;
+    }
+  });
+
   socket.on('disconnect', (reason) => {
     logger.warn(`Disconnected: ${reason}`);
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
   });
 
   socket.on('connect_error', (err) => {
