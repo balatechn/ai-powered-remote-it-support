@@ -116,7 +116,7 @@ function psExec(script) {
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   return execFileSync(
     'powershell.exe',
-    ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded],
+    ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
     { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
   ).toString('utf8').trim();
 }
@@ -278,7 +278,7 @@ while ($true) {
   Start-Sleep -Milliseconds ${intervalMs}
 }`;
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
+  rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
     stdio: ['ignore', 'pipe', 'pipe']
   });
   let buf = '';
