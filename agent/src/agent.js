@@ -13,6 +13,7 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 const { io }    = require('socket.io-client');
 const { exec, execFileSync, spawn } = require('child_process');
+const screenshot = require('screenshot-desktop');
 const os        = require('os');
 const si        = require('systeminformation');
 const winston   = require('winston');
@@ -153,25 +154,9 @@ function parseJsonSafe(str) {
   } catch { return []; }
 }
 
-function toolScreenshot() {
-  if (os.platform() !== 'win32') throw new Error('Screenshot is only supported on Windows');
-  const script = `
-    Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
-    $ms = New-Object System.IO.MemoryStream
-    $encParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
-    $encParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
-      [System.Drawing.Imaging.Encoder]::Quality, 70L)
-    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
-      Where-Object { $_.FormatDescription -eq 'JPEG' }
-    $bmp.Save($ms, $codec, $encParams)
-    [Convert]::ToBase64String($ms.ToArray())
-  `;
-  const b64 = psExec(script);
-  return { image: b64, timestamp: new Date().toISOString() };
+async function toolScreenshot() {
+  const buf = await screenshot({ format: 'jpg' });
+  return { image: buf.toString('base64'), timestamp: new Date().toISOString() };
 }
 
 function toolProcesses() {
@@ -262,8 +247,8 @@ function toolFileDelete(filePath) {
 }
 
 // ── Remote Desktop Streaming ──────────────────────────────────
-let rdviewProc = null;
-let inputProc  = null;
+let rdviewInterval = null;
+let inputProc      = null;
 
 function getInputProc() {
   if (inputProc && !inputProc.killed) return inputProc;
@@ -330,10 +315,10 @@ while (\$true) {
 
   let heartbeatTimer = null;
 
-  // Clean up streaming processes on exit
+  // Clean up streaming on exit
   process.on('exit', () => {
-    if (rdviewProc) rdviewProc.kill();
-    if (inputProc)  inputProc.kill();
+    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
+    if (inputProc) inputProc.kill();
   });
 
   socket.on('connect', async () => {
@@ -359,7 +344,7 @@ while (\$true) {
     let data, error;
     try {
       switch (tool) {
-        case 'screenshot':      data = toolScreenshot();                              break;
+        case 'screenshot':      data = await toolScreenshot();                        break;
         case 'processes':       data = toolProcesses();                               break;
         case 'kill':            data = toolKillProcess(params.pid);                   break;
         case 'services':        data = toolServices();                                break;
@@ -381,64 +366,20 @@ while (\$true) {
   // ── Remote Desktop Streaming ────────────────────────────
   socket.on('rdview:start', ({ quality = 50, fps = 2 } = {}) => {
     if (os.platform() !== 'win32') return;
-    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
     const intervalMs = Math.max(200, Math.round(1000 / Math.min(fps, 10)));
-    const qual = Math.max(10, Math.min(100, quality));
-    const script = `
-Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, ${qual}L)
-while ($true) {
-  try {
-    $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $sw = [int]($b.Width / 2); $sh = [int]($b.Height / 2)
-    $src = New-Object System.Drawing.Bitmap($b.Width, $b.Height)
-    $g0 = [System.Drawing.Graphics]::FromImage($src)
-    $g0.CopyFromScreen(0, 0, 0, 0, $src.Size)
-    $bmp = New-Object System.Drawing.Bitmap($sw, $sh)
-    $g1 = [System.Drawing.Graphics]::FromImage($bmp)
-    $g1.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g1.DrawImage($src, 0, 0, $sw, $sh)
-    $ms = New-Object System.IO.MemoryStream
-    if ($codec) { $bmp.Save($ms, $codec, $ep) } else { $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Jpeg) }
-    $b64 = [Convert]::ToBase64String($ms.ToArray())
-    $g0.Dispose(); $g1.Dispose(); $src.Dispose(); $bmp.Dispose(); $ms.Dispose()
-    [Console]::WriteLine($sw.ToString() + ',' + $sh.ToString() + ',' + $b64)
-    [Console]::Out.Flush()
-  } catch { [Console]::Error.WriteLine($_.Exception.Message) }
-  Start-Sleep -Milliseconds ${intervalMs}
-}`;
-    const encoded = Buffer.from(script, 'utf16le').toString('base64');
-    rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    let buf = '';
-    rdviewProc.stdout.on('data', chunk => {
-      buf += chunk.toString();
-      let idx;
-      while ((idx = buf.indexOf('\n')) !== -1) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line) continue;
-        const c1 = line.indexOf(',');
-        const c2 = line.indexOf(',', c1 + 1);
-        if (c1 < 0 || c2 < 0) continue;
-        const w = parseInt(line.slice(0, c1));
-        const h = parseInt(line.slice(c1 + 1, c2));
-        const img = line.slice(c2 + 1);
-        if (!img || isNaN(w) || isNaN(h)) continue;
-        socket.emit('rdview:frame', { image: img, width: w, height: h, ts: Date.now() });
-      }
-    });
-    rdviewProc.stderr?.on('data', d => logger.warn(`rdview: ${d.toString().trim()}`));
-    rdviewProc.on('close', () => { rdviewProc = null; logger.info('rdview process exited'); });
-    rdviewProc.on('error', err => { logger.error(`rdview spawn error: ${err.message}`); rdviewProc = null; });
-    logger.info(`rdview started — ${fps} fps, quality ${qual}%`);
+    const captureFrame = async () => {
+      try {
+        const buf = await screenshot({ format: 'jpg' });
+        socket.emit('rdview:frame', { image: buf.toString('base64'), ts: Date.now() });
+      } catch (err) { logger.warn(`rdview: ${err.message}`); }
+    };
+    rdviewInterval = setInterval(captureFrame, intervalMs);
+    logger.info(`rdview started — ${fps} fps`);
   });
 
   socket.on('rdview:stop', () => {
-    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
     logger.info('rdview stopped');
   });
 

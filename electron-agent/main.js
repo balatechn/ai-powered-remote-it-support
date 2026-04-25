@@ -18,6 +18,7 @@ const os      = require('os');
 const zlib    = require('zlib');
 const { io }  = require('socket.io-client');
 const { exec, execFileSync, spawn } = require('child_process');
+const screenshot = require('screenshot-desktop');
 const si       = require('systeminformation');
 const winston  = require('winston');
 
@@ -126,23 +127,9 @@ function parseJsonSafe(str) {
   catch { return []; }
 }
 
-function toolScreenshot() {
-  const script = `
-    Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
-    $g = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen(0, 0, 0, 0, $bmp.Size)
-    $ms = New-Object System.IO.MemoryStream
-    $ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-    $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
-      [System.Drawing.Imaging.Encoder]::Quality, 70L)
-    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
-      Where-Object { $_.FormatDescription -eq 'JPEG' }
-    $bmp.Save($ms, $codec, $ep)
-    [Convert]::ToBase64String($ms.ToArray())
-  `;
-  return { image: psExec(script), timestamp: new Date().toISOString() };
+async function toolScreenshot() {
+  const buf = await screenshot({ format: 'jpg' });
+  return { image: buf.toString('base64'), timestamp: new Date().toISOString() };
 }
 
 function toolProcesses() {
@@ -211,7 +198,7 @@ function toolFileUpload(filePath, b64) {
 function toolFileDelete(filePath) { fs.unlinkSync(filePath); return { ok: true }; }
 
 // ── Remote Desktop Streaming ───────────────────────────────
-let rdviewProc = null;
+let rdviewInterval = null;
 let inputProc  = null;
 
 function getInputProc() {
@@ -249,57 +236,16 @@ while (\$true) {
 }
 
 function startRdview(sock, quality, fps) {
-  if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+  if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
   const intervalMs = Math.max(200, Math.round(1000 / Math.min(fps || 2, 10)));
-  const qual = Math.max(10, Math.min(100, quality || 50));
-  const script = `
-Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
-$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,${qual}L)
-while ($true) {
-  try {
-    $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $sw=[int]($b.Width/2); $sh=[int]($b.Height/2)
-    $src=New-Object System.Drawing.Bitmap($b.Width,$b.Height)
-    $g0=[System.Drawing.Graphics]::FromImage($src)
-    $g0.CopyFromScreen(0,0,0,0,$src.Size)
-    $bmp=New-Object System.Drawing.Bitmap($sw,$sh)
-    $g1=[System.Drawing.Graphics]::FromImage($bmp)
-    $g1.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-    $g1.DrawImage($src,0,0,$sw,$sh)
-    $ms=New-Object System.IO.MemoryStream
-    if ($codec) { $bmp.Save($ms,$codec,$ep) } else { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Jpeg) }
-    $b64=[Convert]::ToBase64String($ms.ToArray())
-    $g0.Dispose();$g1.Dispose();$src.Dispose();$bmp.Dispose();$ms.Dispose()
-    [Console]::WriteLine($sw.ToString()+','+$sh.ToString()+','+$b64)
-    [Console]::Out.Flush()
-  } catch { [Console]::Error.WriteLine($_.Exception.Message) }
-  Start-Sleep -Milliseconds ${intervalMs}
-}`;
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  rdviewProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded], {
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let buf = '';
-  rdviewProc.stdout.on('data', chunk => {
-    buf += chunk.toString();
-    let idx;
-    while ((idx = buf.indexOf('\n')) !== -1) {
-      const line = buf.slice(0, idx).trim(); buf = buf.slice(idx + 1);
-      if (!line) continue;
-      const c1 = line.indexOf(','), c2 = line.indexOf(',', c1 + 1);
-      if (c1 < 0 || c2 < 0) continue;
-      const w = parseInt(line.slice(0, c1)), h = parseInt(line.slice(c1 + 1, c2));
-      const img = line.slice(c2 + 1);
-      if (!img || isNaN(w) || isNaN(h)) continue;
-      sock.emit('rdview:frame', { image: img, width: w, height: h, ts: Date.now() });
-    }
-  });
-  rdviewProc.stderr?.on('data', d => logger.warn(`rdview: ${d.toString().trim()}`));
-  rdviewProc.on('close', () => { rdviewProc = null; });
-  rdviewProc.on('error', () => { rdviewProc = null; });
-  logger.info(`rdview started — ${fps} fps, quality ${qual}%`);
+  const captureFrame = async () => {
+    try {
+      const buf = await screenshot({ format: 'jpg' });
+      sock.emit('rdview:frame', { image: buf.toString('base64'), ts: Date.now() });
+    } catch (err) { logger.warn(`rdview: ${err.message}`); }
+  };
+  rdviewInterval = setInterval(captureFrame, intervalMs);
+  logger.info(`rdview started — ${fps} fps`);
 }
 
 // ── App State ──────────────────────────────────────────────
@@ -424,7 +370,7 @@ function startAgent() {
     let data, error;
     try {
       switch (tool) {
-        case 'screenshot':      data = toolScreenshot();                              break;
+        case 'screenshot':      data = await toolScreenshot();                              break;
         case 'processes':       data = toolProcesses();                               break;
         case 'kill':            data = toolKillProcess(params.pid);                   break;
         case 'services':        data = toolServices();                                break;
@@ -448,7 +394,7 @@ function startAgent() {
   });
 
   socket.on('rdview:stop', () => {
-    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
   });
 
   socket.on('rdview:input', ({ type, x, y, button, key } = {}) => {
@@ -487,7 +433,7 @@ function startAgent() {
 
 function stopAgent() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-  if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+  if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
   if (inputProc)  { inputProc.kill();  inputProc  = null; }
   if (socket) { socket.removeAllListeners(); socket.disconnect(); socket = null; }
   agentStatus = 'disconnected';
