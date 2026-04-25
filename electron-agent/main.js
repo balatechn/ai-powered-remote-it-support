@@ -254,22 +254,27 @@ function startRdview(sock, quality, fps) {
   const qual = Math.max(10, Math.min(100, quality || 50));
   const script = `
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-\$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{\$_.FormatDescription -eq 'JPEG'}
-\$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-\$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,${qual}L)
-while (\$true) {
+$codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,${qual}L)
+while ($true) {
   try {
-    \$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    \$bmp=New-Object System.Drawing.Bitmap(\$b.Width,\$b.Height)
-    \$g=[System.Drawing.Graphics]::FromImage(\$bmp)
-    \$g.CopyFromScreen(0,0,0,0,\$bmp.Size)
-    \$ms=New-Object System.IO.MemoryStream
-    \$bmp.Save(\$ms,\$codec,\$ep)
-    \$b64=[Convert]::ToBase64String(\$ms.ToArray())
-    \$g.Dispose();\$bmp.Dispose();\$ms.Dispose()
-    [Console]::WriteLine(\$b.Width.ToString()+','+\$b.Height.ToString()+','+\$b64)
+    $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $sw=[int]($b.Width/2); $sh=[int]($b.Height/2)
+    $src=New-Object System.Drawing.Bitmap($b.Width,$b.Height)
+    $g0=[System.Drawing.Graphics]::FromImage($src)
+    $g0.CopyFromScreen(0,0,0,0,$src.Size)
+    $bmp=New-Object System.Drawing.Bitmap($sw,$sh)
+    $g1=[System.Drawing.Graphics]::FromImage($bmp)
+    $g1.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g1.DrawImage($src,0,0,$sw,$sh)
+    $ms=New-Object System.IO.MemoryStream
+    if ($codec) { $bmp.Save($ms,$codec,$ep) } else { $bmp.Save($ms,[System.Drawing.Imaging.ImageFormat]::Jpeg) }
+    $b64=[Convert]::ToBase64String($ms.ToArray())
+    $g0.Dispose();$g1.Dispose();$src.Dispose();$bmp.Dispose();$ms.Dispose()
+    [Console]::WriteLine($sw.ToString()+','+$sh.ToString()+','+$b64)
     [Console]::Out.Flush()
-  } catch { [Console]::Error.WriteLine(\$_.Exception.Message) }
+  } catch { [Console]::Error.WriteLine($_.Exception.Message) }
   Start-Sleep -Milliseconds ${intervalMs}
 }`;
   const encoded = Buffer.from(script, 'utf16le').toString('base64');

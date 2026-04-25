@@ -120,6 +120,7 @@ module.exports = function setupSocket(io) {
     // ── Remote View frame (forward to all browser clients) ───
     socket.on('rdview:frame', (data) => {
       if (!device) return;
+      logger.debug('rdview:frame received from agent', { hostname: device.hostname, size: data.image?.length });
       io.of('/client').emit('rdview:frame', { ...data, deviceId: device.id });
     });
     // ── Disconnect ─────────────────────────────────────────
@@ -202,12 +203,15 @@ module.exports = function setupSocket(io) {
     // Browser controls remote view streaming
     socket.on('rdview:start', async ({ deviceId, quality, fps }) => {
       try {
+        logger.info('rdview:start received', { deviceId, quality, fps });
         const device = await Device.findByPk(deviceId);
-        if (!device || device.status !== 'online') return;
+        if (!device) { logger.warn('rdview:start — device not found', { deviceId }); return; }
+        if (device.status !== 'online') { logger.warn('rdview:start — device offline', { hostname: device.hostname }); return; }
         const agentSocket = agentNS.sockets.get(device.socket_id);
-        if (!agentSocket) return;
+        if (!agentSocket) { logger.warn('rdview:start — agent socket not found', { socketId: device.socket_id, hostname: device.hostname }); return; }
         agentSocket.emit('rdview:start', { quality: quality || 50, fps: fps || 2 });
-      } catch (err) { /* ignore */ }
+        logger.info('rdview:start forwarded to agent', { hostname: device.hostname });
+      } catch (err) { logger.error('rdview:start error', { error: err.message }); }
     });
 
     socket.on('rdview:stop', async ({ deviceId }) => {
@@ -217,6 +221,7 @@ module.exports = function setupSocket(io) {
         const agentSocket = agentNS.sockets.get(device.socket_id);
         if (!agentSocket) return;
         agentSocket.emit('rdview:stop', {});
+        logger.info('rdview:stop forwarded to agent', { hostname: device.hostname });
       } catch (err) { /* ignore */ }
     });
 
