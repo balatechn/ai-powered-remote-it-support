@@ -29,6 +29,7 @@ const aiRoutes = require('./routes/ai');
 const logRoutes = require('./routes/logs');
 const agentRoutes = require('./routes/agent');
 const dashboardRoutes = require('./routes/dashboard');
+const userRoutes = require('./routes/users');
 
 const app = express();
 const server = http.createServer(app);
@@ -94,6 +95,7 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/users', userRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────
 app.use((req, res) => {
