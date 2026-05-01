@@ -87,7 +87,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      - "3080:80"
     networks:
       - nexusit-network
 
