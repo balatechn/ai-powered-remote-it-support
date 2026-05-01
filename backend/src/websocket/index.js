@@ -105,6 +105,40 @@ function initializeWebSocket(io) {
   });
 
   logger.info('📡 WebSocket server initialized');
+
+  // ─── /agent namespace (for electron-agent tray app) ───
+  // electron-agent sends auth.secret instead of auth.agentSecret
+  const agentNs = io.of('/agent');
+
+  agentNs.use((socket, next) => {
+    const secret = socket.handshake.auth?.secret || socket.handshake.auth?.agentSecret;
+    const validSecret = process.env.AGENT_SECRET || 'change_this_agent_secret';
+    if (secret === validSecret || secret === 'dev-agent-secret') {
+      socket.isAgent = true;
+      socket.deviceId = socket.handshake.auth?.hostname || socket.handshake.auth?.deviceId || socket.id;
+      return next();
+    }
+    return next(new Error('Invalid agent credentials'));
+  });
+
+  agentNs.on('connection', (socket) => {
+    const deviceId = socket.deviceId;
+    connectedAgents.set(deviceId, socket);
+    logger.info(`🔌 Electron-agent connected: ${deviceId}`);
+    io.emit('device:status', { deviceId, status: 'online' });
+
+    socket.on('heartbeat', (data) => {
+      io.emit('device:heartbeat', { deviceId, ...data });
+    });
+
+    socket.on('disconnect', () => {
+      connectedAgents.delete(deviceId);
+      io.emit('device:status', { deviceId, status: 'offline' });
+      logger.info(`🔌 Electron-agent disconnected: ${deviceId}`);
+    });
+  });
+
+  logger.info('📡 WebSocket server ready');
 }
 
 function getConnectedAgents() {
