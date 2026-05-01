@@ -32,6 +32,7 @@ const dashboardRoutes = require('./routes/dashboard');
 const userRoutes = require('./routes/users');
 
 const app = express();
+app.set('trust proxy', 1); // Trust nginx proxy for rate-limiting & IP headers
 const server = http.createServer(app);
 
 // WebSocket setup
