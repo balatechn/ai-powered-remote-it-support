@@ -1,43 +1,80 @@
-import { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { useAuthStore } from './stores/authStore.js';
-import Layout from './components/Layout.jsx';
+/**
+ * App Component
+ * Root application with routing and auth guard.
+ */
 
-const LoginPage      = lazy(() => import('./pages/LoginPage.jsx'));
-const DevicesPage    = lazy(() => import('./pages/DevicesPage.jsx'));
-const TerminalPage   = lazy(() => import('./pages/TerminalPage.jsx'));
-const LogsPage       = lazy(() => import('./pages/LogsPage.jsx'));
-const RemoteToolsPage = lazy(() => import('./pages/RemoteToolsPage.jsx'));
-const UsersPage      = lazy(() => import('./pages/UsersPage.jsx'));
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
+import { Toaster } from 'react-hot-toast';
+import useAuthStore from './stores/authStore';
+import Layout from './components/Layout';
+import LoginPage from './pages/LoginPage';
+import DashboardPage from './pages/DashboardPage';
+import DevicesPage from './pages/DevicesPage';
+import SessionsPage from './pages/SessionsPage';
+import ScriptsPage from './pages/ScriptsPage';
+import AIInsightsPage from './pages/AIInsightsPage';
+import LogsPage from './pages/LogsPage';
+import UsersPage from './pages/UsersPage';
+import RemoteToolsPage from './pages/RemoteToolsPage';
+import TerminalPage from './pages/TerminalPage';
 
-function PageLoader() {
-  return (
-    <div className="flex-1 flex items-center justify-center h-screen bg-gray-950">
-      <div className="w-7 h-7 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-    </div>
-  );
-}
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, isLoading } = useAuthStore();
 
-function PrivateRoute({ children }) {
-  const token = useAuthStore(s => s.token);
-  return token ? children : <Navigate to="/login" replace />;
+  if (isLoading) {
+    return (
+      <div className="h-screen w-screen flex items-center justify-center bg-surface-900">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+          <p className="text-white/50 text-sm">Loading NexusIT...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return isAuthenticated ? children : <Navigate to="/login" />;
 }
 
 export default function App() {
+  const { initialize } = useAuthStore();
+
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
+
   return (
-    <Suspense fallback={<PageLoader />}>
+    <Router>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {
+            background: '#1e293b',
+            color: '#fff',
+            border: '1px solid rgba(255,255,255,0.06)',
+            borderRadius: '12px',
+          }
+        }}
+      />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>
-          <Route index element={<Navigate to="/devices" replace />} />
+        <Route path="/" element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }>
+          <Route index element={<DashboardPage />} />
           <Route path="devices" element={<DevicesPage />} />
-          <Route path="terminal/:deviceId" element={<TerminalPage />} />
-          <Route path="remote/:deviceId" element={<RemoteToolsPage />} />
+          <Route path="sessions" element={<SessionsPage />} />
+          <Route path="terminal" element={<TerminalPage />} />
+          <Route path="remote-tools" element={<RemoteToolsPage />} />
+          <Route path="scripts" element={<ScriptsPage />} />
+          <Route path="ai-insights" element={<AIInsightsPage />} />
           <Route path="logs" element={<LogsPage />} />
           <Route path="users" element={<UsersPage />} />
         </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<Navigate to="/" />} />
       </Routes>
-    </Suspense>
+    </Router>
   );
 }

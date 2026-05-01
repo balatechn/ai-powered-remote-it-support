@@ -1,108 +1,98 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuthStore } from '../stores/authStore.js';
+import { Cpu, Eye, EyeOff, Loader2 } from 'lucide-react';
+import useAuthStore from '../stores/authStore';
 import toast from 'react-hot-toast';
-import { Cpu } from 'lucide-react';
 
 export default function LoginPage() {
-  const [mode, setMode]         = useState('login'); // 'login' | 'register'
-  const [loading, setLoading]   = useState(false);
-  const [form, setForm]         = useState({ email: '', password: '', first_name: '', last_name: '' });
-  const { login, register }     = useAuthStore();
-  const navigate                = useNavigate();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const { login } = useAuthStore();
+  const navigate = useNavigate();
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-
-  const submit = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (!email || !password) { toast.error('Please enter email and password'); return; }
     setLoading(true);
     try {
-      if (mode === 'login') {
-        await login(form.email, form.password);
-      } else {
-        await register(form);
-      }
-      navigate('/devices');
+      await login(email, password);
+      navigate('/');
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Authentication failed');
+      toast.error(err?.response?.data?.error || 'Invalid credentials');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-950 px-4">
-      <div className="w-full max-w-sm">
+    <div className="min-h-screen bg-surface-900 flex items-center justify-center p-4">
+      {/* Background glow */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-brand-600/10 rounded-full blur-3xl" />
+      </div>
+
+      <div className="relative w-full max-w-sm">
         {/* Logo */}
-        <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-11 h-11 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-900/50">
-            <Cpu size={22} className="text-white" />
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-14 h-14 rounded-2xl bg-brand-600/20 border border-brand-500/30 flex items-center justify-center mb-4">
+            <Cpu className="w-7 h-7 text-brand-400" />
           </div>
-          <span className="text-2xl font-bold text-white">NexusIT</span>
+          <h1 className="text-2xl font-bold text-white">NexusIT</h1>
+          <p className="text-sm text-white/40 mt-1">AI-Powered Remote IT Support</p>
         </div>
 
-        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 shadow-xl">
-          <h1 className="text-xl font-semibold text-white mb-1">
-            {mode === 'login' ? 'Sign in' : 'Create account'}
-          </h1>
-          <p className="text-sm text-gray-400 mb-6">
-            {mode === 'login' ? 'Remote IT Support Platform' : 'Get started in seconds'}
-          </p>
-
-          <form onSubmit={submit} className="space-y-4">
-            {mode === 'register' && (
-              <div className="grid grid-cols-2 gap-3">
+        {/* Card */}
+        <div className="glass-card p-7">
+          <h2 className="text-lg font-semibold text-white mb-6">Sign in to your account</h2>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-white/50 mb-1.5">Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@nexusit.io"
+                className="glass-input w-full"
+                autoComplete="email"
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-white/50 mb-1.5">Password</label>
+              <div className="relative">
                 <input
-                  required
-                  placeholder="First name"
-                  value={form.first_name}
-                  onChange={e => set('first_name', e.target.value)}
-                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-full"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="glass-input w-full pr-10"
+                  autoComplete="current-password"
                 />
-                <input
-                  required
-                  placeholder="Last name"
-                  value={form.last_name}
-                  onChange={e => set('last_name', e.target.value)}
-                  className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-full"
-                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
-            )}
-            <input
-              type="email"
-              required
-              placeholder="Email address"
-              value={form.email}
-              onChange={e => set('email', e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-            />
-            <input
-              type="password"
-              required
-              placeholder="Password"
-              value={form.password}
-              onChange={e => set('password', e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-            />
+            </div>
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg transition-colors"
+              className="glass-button w-full flex items-center justify-center gap-2 mt-2"
             >
-              {loading ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+              {loading ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
-
-          <p className="text-center text-sm text-gray-500 mt-5">
-            {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-            <button
-              onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
-              className="text-indigo-400 hover:text-indigo-300 font-medium"
-            >
-              {mode === 'login' ? 'Register' : 'Sign in'}
-            </button>
-          </p>
         </div>
+
+        <p className="text-center text-xs text-white/20 mt-6">
+          NexusIT v1.0 · Secure Remote Management
+        </p>
       </div>
     </div>
   );

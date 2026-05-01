@@ -1,35 +1,41 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import api from '../lib/api';
+import { authAPI } from '../lib/api';
 
-export const useAuthStore = create(
-  persist(
-    (set, get) => ({
-      user:  null,
-      token: null,
+const useAuthStore = create((set, get) => ({
+  user: null,
+  isAuthenticated: false,
+  isLoading: true,
 
-      login: async (email, password) => {
-        const { data } = await api.post('/auth/login', { email, password });
-        api.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
-        set({ user: data.user, token: data.token });
-      },
+  initialize: async () => {
+    const token = localStorage.getItem('accessToken');
+    if (!token) {
+      set({ isLoading: false });
+      return;
+    }
+    try {
+      const { data } = await authAPI.me();
+      set({ user: data.user, isAuthenticated: true, isLoading: false });
+    } catch {
+      localStorage.removeItem('accessToken');
+      localStorage.removeItem('refreshToken');
+      set({ user: null, isAuthenticated: false, isLoading: false });
+    }
+  },
 
-      register: async (payload) => {
-        const { data } = await api.post('/auth/register', payload);
-        api.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
-        set({ user: data.user, token: data.token });
-      },
+  login: async (email, password) => {
+    const { data } = await authAPI.login({ email, password });
+    localStorage.setItem('accessToken', data.accessToken);
+    localStorage.setItem('refreshToken', data.refreshToken);
+    set({ user: data.user, isAuthenticated: true });
+    return data;
+  },
 
-      logout: () => {
-        delete api.defaults.headers.common['Authorization'];
-        set({ user: null, token: null });
-      },
+  logout: async () => {
+    try { await authAPI.logout(); } catch {}
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    set({ user: null, isAuthenticated: false });
+  },
+}));
 
-      init: () => {
-        const { token } = get();
-        if (token) api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      }
-    }),
-    { name: 'nexusit-auth', partialize: s => ({ token: s.token, user: s.user }) }
-  )
-);
+export default useAuthStore;

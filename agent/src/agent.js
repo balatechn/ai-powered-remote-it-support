@@ -1,422 +1,376 @@
-'use strict';
 /**
- * NexusIT Endpoint Agent
- * ─────────────────────
- * - Connects to server via WebSocket /agent namespace
- * - Authenticates with AGENT_SECRET
- * - Sends heartbeat every HEARTBEAT_INTERVAL ms
- * - Executes cmd / powershell commands on request
- * - Streams output chunks back in real-time
- * - Auto-reconnects on disconnect
+ * Endpoint Agent
+ * Lightweight background service that registers with the server,
+ * sends heartbeats/telemetry, and executes remote scripts.
  */
 
-require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
-const { io }    = require('socket.io-client');
-const { exec, execFileSync, spawn } = require('child_process');
-const screenshot = require('screenshot-desktop');
-const os        = require('os');
-const si        = require('systeminformation');
-const winston   = require('winston');
-const path      = require('path');
-const fs        = require('fs');
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 
-// ── Config ────────────────────────────────────────────────────
-const SERVER_URL          = process.env.SERVER_URL || 'http://localhost:4000';
-const AGENT_SECRET        = process.env.AGENT_SECRET || 'change_this_agent_secret';
-const HEARTBEAT_INTERVAL  = parseInt(process.env.HEARTBEAT_INTERVAL || '10000');
-const AGENT_VERSION       = '2.0.0';
+const { io } = require('socket.io-client');
+const axios = require('axios');
+const os = require('os');
+const { exec } = require('child_process');
+const si = require('systeminformation');
+const { v4: uuidv4 } = require('uuid');
+const winston = require('winston');
+const fs = require('fs');
+const path = require('path');
 
-// ── Logger ────────────────────────────────────────────────────
-const logDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+// ─── Configuration ───────────────────────────────────────────
+const SERVER_URL = process.env.SERVER_URL || 'http://localhost:4000';
+const AGENT_SECRET = process.env.AGENT_SECRET || 'dev-agent-secret';
+const HEARTBEAT_INTERVAL = parseInt(process.env.HEARTBEAT_INTERVAL || '30000');
+const DEVICE_ID_FILE = path.resolve(__dirname, '../.device-id');
 
+// ─── Logger ──────────────────────────────────────────────────
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-    winston.format.printf(({ timestamp, level, message }) => `${timestamp} [${level.toUpperCase()}] ${message}`)
-  ),
+  format: winston.format.combine(winston.format.timestamp(), winston.format.simple()),
   transports: [
     new winston.transports.Console(),
-    new winston.transports.File({ filename: path.join(logDir, 'agent.log'), maxsize: 5242880, maxFiles: 3 })
+    new winston.transports.File({ filename: path.resolve(__dirname, '../logs/agent.log'), maxsize: 5242880, maxFiles: 3 })
   ]
 });
 
-// ── System info ───────────────────────────────────────────────
-function getLocalIp() {
-  const ifaces = os.networkInterfaces();
-  for (const name of Object.keys(ifaces)) {
-    for (const iface of ifaces[name]) {
-      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+// ─── Device ID Persistence ───────────────────────────────────
+function getDeviceId() {
+  try {
+    if (fs.existsSync(DEVICE_ID_FILE)) {
+      return fs.readFileSync(DEVICE_ID_FILE, 'utf8').trim();
     }
-  }
-  return '127.0.0.1';
+  } catch {}
+  return null;
 }
 
-async function getStats() {
-  try {
-    const [cpu, mem, disk, users] = await Promise.all([
-      si.currentLoad(),
-      si.mem(),
-      si.fsSize(),
-      si.users()
-    ]);
-    const mainDisk = disk.find(d => d.mount === 'C:' || d.mount === '/') || disk[0];
-    return {
-      cpu:    Math.round(cpu.currentLoad * 10) / 10,
-      memory: Math.round(((mem.total - mem.available) / mem.total) * 1000) / 10,
-      disk:   mainDisk ? Math.round((mainDisk.used / mainDisk.size) * 1000) / 10 : null,
-      users:  users.map(u => u.user).filter(Boolean)
-    };
-  } catch {
-    return { cpu: null, memory: null, disk: null, users: [] };
-  }
+function saveDeviceId(id) {
+  fs.mkdirSync(path.dirname(DEVICE_ID_FILE), { recursive: true });
+  fs.writeFileSync(DEVICE_ID_FILE, id);
 }
 
-async function getOsVersion() {
-  try {
-    const info = await si.osInfo();
-    return `${info.distro} ${info.release}`.trim() || os.release();
-  } catch {
-    return os.release();
-  }
-}
+// ─── System Info Collection ──────────────────────────────────
+async function getSystemInfo() {
+  const [cpu, mem, disk, osInfo, networkInterfaces] = await Promise.all([
+    si.currentLoad(),
+    si.mem(),
+    si.fsSize(),
+    si.osInfo(),
+    si.networkInterfaces()
+  ]);
 
-// ── Command execution ─────────────────────────────────────────
-function buildCommand(type, command) {
-  if (type === 'powershell') {
-    return `powershell -NonInteractive -Command "${command.replace(/"/g, '\\"')}"`;
-  }
-  // cmd — on Windows use cmd /c, on Linux allow bash
-  if (os.platform() === 'win32') return `cmd /c ${command}`;
-  return command;
-}
+  const primaryDisk = disk[0] || {};
+  const primaryNet = networkInterfaces.find(n => n.ip4 && !n.internal) || {};
 
-function runCommand(socket, commandId, type, command) {
-  const shellCmd = buildCommand(type, command);
-  logger.info(`Executing [${type}]: ${command}`);
-
-  const startTime = Date.now();
-  let fullOutput  = '';
-
-  const child = exec(shellCmd, { timeout: 60000, maxBuffer: 1024 * 1024 * 10 });
-
-  const emit = (chunk) => {
-    fullOutput += chunk;
-    socket.emit('cmd:output', { commandId, chunk });
+  return {
+    hostname: os.hostname(),
+    ip_address: primaryNet.ip4 || '0.0.0.0',
+    mac_address: primaryNet.mac || '00:00:00:00:00:00',
+    os_type: osInfo.platform === 'win32' ? 'windows' : osInfo.platform === 'darwin' ? 'macos' : 'linux',
+    os_version: `${osInfo.distro} ${osInfo.release}`,
+    cpu_usage: Math.round(cpu.currentLoad * 100) / 100,
+    memory_usage: Math.round((mem.used / mem.total) * 10000) / 100,
+    disk_usage: Math.round(primaryDisk.use * 100) / 100 || 0,
+    agent_version: '1.0.0',
+    metadata: {
+      cpu_model: os.cpus()[0]?.model,
+      cpu_cores: os.cpus().length,
+      total_memory: Math.round(mem.total / (1024 * 1024 * 1024) * 100) / 100,
+      uptime: os.uptime()
+    }
   };
+}
 
-  child.stdout?.on('data', chunk => emit(chunk));
-  child.stderr?.on('data', chunk => emit(chunk));
+// ─── Script Execution (Sandboxed) ────────────────────────────
+function executeScript(scriptData) {
+  const { scriptId, content, type, requestedBy } = scriptData;
+  logger.info(`Executing script ${scriptId} (${type}) requested by ${requestedBy}`);
 
-  child.on('close', (code) => {
-    const durationMs = Date.now() - startTime;
-    socket.emit('cmd:output', {
-      commandId,
-      chunk:      '',
-      done:       true,
-      exitCode:   code ?? 0,
-      output:     fullOutput,
-      durationMs
+  const cmd = type === 'powershell' ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "${content.replace(/"/g, '\\"')}"` :
+              type === 'bash' ? content : `python3 -c "${content}"`;
+
+  const timeout = 60000; // 60 second timeout
+
+  return new Promise((resolve) => {
+    exec(cmd, { timeout, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      const result = {
+        scriptId,
+        exit_code: error ? error.code || 1 : 0,
+        output: stdout?.toString() || '',
+        error: stderr?.toString() || error?.message || ''
+      };
+
+      logger.info(`Script ${scriptId} completed: exit code ${result.exit_code}`);
+      resolve(result);
     });
-    logger.info(`Command done in ${durationMs}ms, exit=${code}`);
-  });
-
-  child.on('error', (err) => {
-    const durationMs = Date.now() - startTime;
-    socket.emit('cmd:output', {
-      commandId,
-      chunk:      `\nError: ${err.message}`,
-      done:       true,
-      exitCode:   1,
-      output:     fullOutput + `\nError: ${err.message}`,
-      durationMs
-    });
-    logger.error(`Command error: ${err.message}`);
   });
 }
 
-// ── Remote Tools ──────────────────────────────────────────────
-// Execute a PowerShell script via -EncodedCommand (avoids quoting issues)
-function psExec(script) {
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  return execFileSync(
-    'powershell.exe',
-    ['-NonInteractive', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-    { timeout: 30000, maxBuffer: 50 * 1024 * 1024 }
-  ).toString('utf8').trim();
-}
+// ─── Fix Tools ───────────────────────────────────────────────
+const fixToolCommands = {
+  clearTemp: 'Remove-Item -Path "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Temp files cleared."',
+  flushDNS:  'ipconfig /flushdns',
+  resetWinsock: 'netsh winsock reset; netsh int ip reset; Write-Output "Winsock reset complete. Restart required."',
+  restartExplorer: 'Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Process explorer; Write-Output "Explorer restarted."',
+  checkDisk: 'Write-Output "CHKDSK scheduled on next reboot."; cmd /c "echo y | chkdsk C: /f /r /x 2>&1"',
+  systemFileChecker: 'sfc /scannow',
+};
 
-function parseJsonSafe(str) {
-  try {
-    const v = JSON.parse(str);
-    return Array.isArray(v) ? v : (v ? [v] : []);
-  } catch { return []; }
-}
+async function runFixTool(toolId) {
+  logger.info(`Running fix tool: ${toolId}`);
 
-async function toolScreenshot() {
-  const buf = await screenshot({ format: 'jpg' });
-  return { image: buf.toString('base64'), timestamp: new Date().toISOString() };
-}
-
-function toolProcesses() {
-  const script = `
-    @(Get-Process | Sort-Object CPU -Descending | Select-Object -First 150 |
-      Select-Object Id, Name,
-        @{N='CPU';E={[Math]::Round($_.CPU,1)}},
-        @{N='MemMB';E={[Math]::Round($_.WorkingSet64/1MB,1)}},
-        @{N='Path';E={try{$_.Path}catch{''}}} ) |
-    ConvertTo-Json -Compress -Depth 2
-  `;
-  return { processes: parseJsonSafe(psExec(script)) };
-}
-
-function toolKillProcess(pid) {
-  const safePid = parseInt(pid);
-  if (isNaN(safePid)) throw new Error('Invalid PID');
-  psExec(`Stop-Process -Id ${safePid} -Force -ErrorAction Stop`);
-  return { ok: true };
-}
-
-function toolServices() {
-  const script = `
-    @(Get-Service | Select-Object Name, DisplayName,
-        @{N='Status';E={$_.Status.ToString()}},
-        @{N='StartType';E={$_.StartType.ToString()}} |
-      Sort-Object DisplayName) |
-    ConvertTo-Json -Compress -Depth 2
-  `;
-  return { services: parseJsonSafe(psExec(script)) };
-}
-
-function toolServiceControl(name, action) {
-  if (!/^[\w\s\-.]+$/.test(name)) throw new Error('Invalid service name');
-  const cmds = { start: 'Start-Service', stop: 'Stop-Service', restart: 'Restart-Service' };
-  const cmd = cmds[action];
-  if (!cmd) throw new Error(`Unknown action: ${action}`);
-  psExec(`${cmd} -Name '${name}' -Force -ErrorAction Stop`);
-  return { ok: true };
-}
-
-function toolInventory() {
-  const script = `
-    $paths = @(
-      'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
-      'HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
-    )
-    @(Get-ItemProperty $paths -ErrorAction SilentlyContinue |
-      Where-Object { $_.DisplayName } |
-      Select-Object DisplayName, DisplayVersion, Publisher, InstallDate |
-      Sort-Object DisplayName) |
-    ConvertTo-Json -Compress -Depth 2
-  `;
-  return { software: parseJsonSafe(psExec(script)) };
-}
-
-function toolFileList(dirPath) {
-  const target = dirPath || (os.platform() === 'win32' ? 'C:\\' : '/');
-  const entries = [];
-  const items = fs.readdirSync(target);
-  for (const name of items.slice(0, 500)) {
-    try {
-      const st = fs.statSync(path.join(target, name));
-      entries.push({ name, isDir: st.isDirectory(), size: st.size, modified: st.mtime.toISOString() });
-    } catch { /* skip inaccessible */ }
+  // fixAll runs all safe tools in sequence
+  if (toolId === 'fixAll') {
+    const safeTools = ['clearTemp', 'flushDNS', 'restartExplorer'];
+    const outputs = [];
+    for (const tid of safeTools) {
+      const r = await runFixTool(tid);
+      outputs.push(`[${tid}]: ${r.output || r.error}`);
+    }
+    return { toolId: 'fixAll', success: true, output: outputs.join('\n') };
   }
-  entries.sort((a, b) => (Number(b.isDir) - Number(a.isDir)) || a.name.localeCompare(b.name));
-  return { path: target, entries };
+
+  const cmd = fixToolCommands[toolId];
+  if (!cmd) {
+    return { toolId, success: false, error: `Unknown tool: ${toolId}` };
+  }
+
+  const psCmd = `powershell -NoProfile -ExecutionPolicy Bypass -Command "${cmd.replace(/"/g, '\\"')}"`;
+
+  return new Promise((resolve) => {
+    exec(psCmd, { timeout: 120000, maxBuffer: 1024 * 512 }, (error, stdout, stderr) => {
+      const output = (stdout || '').trim();
+      const errText = (stderr || error?.message || '').trim();
+      logger.info(`Fix tool [${toolId}] exit: ${error ? error.code || 1 : 0}`);
+      resolve({
+        toolId,
+        success: !error,
+        output: output || (error ? '' : 'Done'),
+        error: errText,
+      });
+    });
+  });
 }
 
-function toolFileDownload(filePath) {
-  const MAX = 100 * 1024 * 1024;
-  const st = fs.statSync(filePath);
-  if (st.size > MAX) throw new Error('File too large (max 100 MB)');
-  const buf = fs.readFileSync(filePath);
-  return { name: path.basename(filePath), size: st.size, data: buf.toString('base64') };
-}
+// ─── Main Agent Logic ────────────────────────────────────────
+async function main() {
+  logger.info('🚀 AI Remote IT Support Agent starting...');
 
-function toolFileUpload(filePath, b64) {
-  const buf = Buffer.from(b64, 'base64');
-  fs.writeFileSync(filePath, buf);
-  return { ok: true, size: buf.length };
-}
+  let deviceId = getDeviceId();
+  const sysInfo = await getSystemInfo();
 
-function toolFileDelete(filePath) {
-  fs.unlinkSync(filePath);
-  return { ok: true };
-}
-
-// ── Remote Desktop Streaming ──────────────────────────────────
-let rdviewInterval = null;
-let inputProc      = null;
-
-function getInputProc() {
-  if (inputProc && !inputProc.killed) return inputProc;
-  const script = `
-Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32Input {
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, UIntPtr e);
-    public const uint LDN=0x0002u, LUP=0x0004u, RDN=0x0008u, RUP=0x0010u;
-}
-"@
-\$r = [Console]::In
-while (\$true) {
-    \$l = \$r.ReadLine()
-    if (\$null -eq \$l) { break }
-    \$p = \$l.Trim().Split(' ')
-    switch (\$p[0]) {
-        'MOVE'   { [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null }
-        'LCLICK' {
-            [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null
-            [Win32Input]::mouse_event([Win32Input]::LDN, 0, 0, 0, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 30
-            [Win32Input]::mouse_event([Win32Input]::LUP, 0, 0, 0, [UIntPtr]::Zero)
-        }
-        'RCLICK' {
-            [Win32Input]::SetCursorPos([int]\$p[1], [int]\$p[2]) | Out-Null
-            [Win32Input]::mouse_event([Win32Input]::RDN, 0, 0, 0, [UIntPtr]::Zero)
-            Start-Sleep -Milliseconds 30
-            [Win32Input]::mouse_event([Win32Input]::RUP, 0, 0, 0, [UIntPtr]::Zero)
-        }
-        'KEY'    { if (\$p[1]) { [System.Windows.Forms.SendKeys]::SendWait(\$p[1]) } }
+  // ── Register with server ─────────────────────────────────
+  try {
+    const { data } = await axios.post(`${SERVER_URL}/api/agent/register`, sysInfo, {
+      headers: { 'X-Agent-Secret': AGENT_SECRET }
+    });
+    deviceId = data.device_id;
+    saveDeviceId(deviceId);
+    logger.info(`✅ Registered with server. Device ID: ${deviceId}`);
+  } catch (error) {
+    logger.error(`❌ Registration failed: ${error.message}`);
+    if (!deviceId) {
+      logger.error('No device ID available. Retrying in 30s...');
+      setTimeout(main, 30000);
+      return;
     }
-}`;
-  const encoded = Buffer.from(script, 'utf16le').toString('base64');
-  inputProc = spawn('powershell.exe', ['-NonInteractive', '-NoProfile', '-EncodedCommand', encoded], {
-    stdio: ['pipe', 'ignore', 'pipe']
-  });
-  inputProc.on('close',  ()    => { inputProc = null; });
-  inputProc.on('error',  (err) => { logger.error(`inputProc error: ${err.message}`); inputProc = null; });
-  return inputProc;
-}
+  }
 
-// ── Main ──────────────────────────────────────────────────────
-(async () => {
-  const hostname  = os.hostname();
-  const platform  = os.platform();
-  const localIp   = getLocalIp();
-  const osVersion = await getOsVersion();
-
-  logger.info(`NexusIT Agent v${AGENT_VERSION} starting`);
-  logger.info(`Host: ${hostname} | OS: ${platform} | IP: ${localIp}`);
-  logger.info(`Server: ${SERVER_URL}`);
-
-  const socket = io(`${SERVER_URL}/agent`, {
-    auth:          { secret: AGENT_SECRET, hostname, platform, osVersion, localIp, agentVersion: AGENT_VERSION },
-    reconnection:  true,
-    reconnectionDelay:    3000,
-    reconnectionDelayMax: 30000,
-    transports:    ['websocket']
+  // ── WebSocket Connection ─────────────────────────────────
+  const socket = io(SERVER_URL, {
+    auth: { agentSecret: AGENT_SECRET, deviceId },
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 5000
   });
 
-  let heartbeatTimer = null;
-
-  // Clean up streaming on exit
-  process.on('exit', () => {
-    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
-    if (inputProc) inputProc.kill();
-  });
-
-  socket.on('connect', async () => {
-    logger.info(`Connected to server (socket: ${socket.id})`);
-
-    // Start heartbeat
-    const sendHeartbeat = async () => {
-      const stats = await getStats();
-      socket.emit('heartbeat', stats);
-    };
-    sendHeartbeat();
-    heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
-  });
-
-  socket.on('cmd:run', ({ commandId, type, command, runAs }) => {
-    runCommand(socket, commandId, type, command);
-  });
-
-  // ── Remote Tool Requests ────────────────────────────────
-  socket.on('tool:request', async ({ requestId, tool, params }) => {
-    logger.info(`Tool request: ${tool}`);
-    params = params || {};
-    let data, error;
-    try {
-      switch (tool) {
-        case 'screenshot':      data = await toolScreenshot();                        break;
-        case 'processes':       data = toolProcesses();                               break;
-        case 'kill':            data = toolKillProcess(params.pid);                   break;
-        case 'services':        data = toolServices();                                break;
-        case 'service:control': data = toolServiceControl(params.name, params.action); break;
-        case 'inventory':       data = toolInventory();                               break;
-        case 'file:list':       data = toolFileList(params.path);                     break;
-        case 'file:download':   data = toolFileDownload(params.path);                 break;
-        case 'file:upload':     data = toolFileUpload(params.path, params.data);      break;
-        case 'file:delete':     data = toolFileDelete(params.path);                   break;
-        default: throw new Error(`Unknown tool: ${tool}`);
-      }
-    } catch (err) {
-      logger.error(`Tool error [${tool}]: ${err.message}`);
-      error = err.message;
-    }
-    socket.emit('tool:result', { requestId, tool, data: data ?? null, error: error ?? null });
-  });
-
-  // ── Remote Desktop Streaming ────────────────────────────
-  socket.on('rdview:start', ({ quality = 50, fps = 2 } = {}) => {
-    if (os.platform() !== 'win32') return;
-    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
-    const intervalMs = Math.max(200, Math.round(1000 / Math.min(fps, 10)));
-    const captureFrame = async () => {
-      try {
-        const buf = await screenshot({ format: 'jpg' });
-        socket.emit('rdview:frame', { image: buf.toString('base64'), ts: Date.now() });
-      } catch (err) { logger.warn(`rdview: ${err.message}`); }
-    };
-    rdviewInterval = setInterval(captureFrame, intervalMs);
-    logger.info(`rdview started — ${fps} fps`);
-  });
-
-  socket.on('rdview:stop', () => {
-    if (rdviewInterval) { clearInterval(rdviewInterval); rdviewInterval = null; }
-    logger.info('rdview stopped');
-  });
-
-  socket.on('rdview:input', ({ type, x, y, button, key } = {}) => {
-    if (os.platform() !== 'win32') return;
-    try {
-      const proc = getInputProc();
-      if (!proc || proc.killed) return;
-      const xi = Math.round(Number(x)), yi = Math.round(Number(y));
-      if (type === 'mousemove') {
-        proc.stdin.write(`MOVE ${xi} ${yi}\n`);
-      } else if (type === 'click') {
-        const cmd = button === 'right' ? 'RCLICK' : 'LCLICK';
-        proc.stdin.write(`${cmd} ${xi} ${yi}\n`);
-      } else if (type === 'key' && key) {
-        proc.stdin.write(`KEY ${key}\n`);
-      }
-    } catch (err) {
-      logger.error(`rdview:input error: ${err.message}`);
-      inputProc = null;
-    }
+  socket.on('connect', () => {
+    logger.info('📡 WebSocket connected');
   });
 
   socket.on('disconnect', (reason) => {
-    logger.warn(`Disconnected: ${reason}`);
-    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-    if (rdviewProc) { rdviewProc.kill(); rdviewProc = null; }
+    logger.warn(`📡 WebSocket disconnected: ${reason}`);
   });
 
-  socket.on('connect_error', (err) => {
-    logger.error(`Connection error: ${err.message}`);
+  socket.on('connect_error', (error) => {
+    logger.error(`📡 Connection error: ${error.message}`);
   });
 
-  socket.on('reconnect', (attempt) => {
-    logger.info(`Reconnected after ${attempt} attempts`);
+  // ── Handle Script Execution Commands ─────────────────────
+  socket.on('script:execute', async (data) => {
+    try {
+      const result = await executeScript(data);
+      socket.emit('script:result', result);
+
+      // Also report to REST API
+      await axios.post(`${SERVER_URL}/api/agent/script-result`, {
+        device_id: deviceId, ...result
+      }, {
+        headers: { 'X-Agent-Secret': AGENT_SECRET }
+      });
+    } catch (error) {
+      logger.error(`Script execution error: ${error.message}`);
+    }
   });
 
-  process.on('SIGINT',  () => { logger.info('Shutting down…'); socket.disconnect(); process.exit(0); });
-  process.on('SIGTERM', () => { logger.info('Shutting down…'); socket.disconnect(); process.exit(0); });
-})();
+  // ── Handle Fix Tool Commands ─────────────────────────────
+  socket.on('tool:execute', async (data) => {
+    const { toolId } = data || {};
+    if (!toolId) {
+      socket.emit('tool:result', { toolId: 'unknown', success: false, error: 'No toolId provided' });
+      return;
+    }
+    try {
+      const result = await runFixTool(toolId);
+      socket.emit('tool:result', result);
+    } catch (error) {
+      logger.error(`Fix tool error [${toolId}]: ${error.message}`);
+      socket.emit('tool:result', { toolId, success: false, error: error.message });
+    }
+  });
+
+  // ── Heartbeat Loop ───────────────────────────────────────
+  async function sendHeartbeat() {
+    try {
+      const info = await getSystemInfo();
+      const heartbeatData = {
+        device_id: deviceId,
+        cpu_usage: info.cpu_usage,
+        memory_usage: info.memory_usage,
+        disk_usage: info.disk_usage,
+        metadata: info.metadata
+      };
+
+      // Send via WebSocket
+      socket.emit('heartbeat', heartbeatData);
+
+      // Also via REST API as backup
+      await axios.post(`${SERVER_URL}/api/agent/heartbeat`, heartbeatData, {
+        headers: { 'X-Agent-Secret': AGENT_SECRET }
+      });
+    } catch (error) {
+      logger.error(`Heartbeat error: ${error.message}`);
+    }
+  }
+
+  // Initial heartbeat + interval
+  sendHeartbeat();
+  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+  logger.info(`💓 Heartbeat interval: ${HEARTBEAT_INTERVAL / 1000}s`);
+  logger.info('✅ Agent running. Waiting for commands...');
+}
+
+// ─── Start ───────────────────────────────────────────────────
+main().catch(err => {
+  logger.error('Agent fatal error:', err);
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('Agent shutting down...');
+  process.exit(0);
+});
+
+async function main() {
+  logger.info('🚀 AI Remote IT Support Agent starting...');
+
+  let deviceId = getDeviceId();
+  const sysInfo = await getSystemInfo();
+
+  // ── Register with server ─────────────────────────────────
+  try {
+    const { data } = await axios.post(`${SERVER_URL}/api/agent/register`, sysInfo, {
+      headers: { 'X-Agent-Secret': AGENT_SECRET }
+    });
+    deviceId = data.device_id;
+    saveDeviceId(deviceId);
+    logger.info(`✅ Registered with server. Device ID: ${deviceId}`);
+  } catch (error) {
+    logger.error(`❌ Registration failed: ${error.message}`);
+    if (!deviceId) {
+      logger.error('No device ID available. Retrying in 30s...');
+      setTimeout(main, 30000);
+      return;
+    }
+  }
+
+  // ── WebSocket Connection ─────────────────────────────────
+  const socket = io(SERVER_URL, {
+    auth: { agentSecret: AGENT_SECRET, deviceId },
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 5000
+  });
+
+  socket.on('connect', () => {
+    logger.info('📡 WebSocket connected');
+  });
+
+  socket.on('disconnect', (reason) => {
+    logger.warn(`📡 WebSocket disconnected: ${reason}`);
+  });
+
+  socket.on('connect_error', (error) => {
+    logger.error(`📡 Connection error: ${error.message}`);
+  });
+
+  // ── Handle Script Execution Commands ─────────────────────
+  socket.on('script:execute', async (data) => {
+    try {
+      const result = await executeScript(data);
+      socket.emit('script:result', result);
+
+      // Also report to REST API
+      await axios.post(`${SERVER_URL}/api/agent/script-result`, {
+        device_id: deviceId, ...result
+      }, {
+        headers: { 'X-Agent-Secret': AGENT_SECRET }
+      });
+    } catch (error) {
+      logger.error(`Script execution error: ${error.message}`);
+    }
+  });
+
+  // ── Heartbeat Loop ───────────────────────────────────────
+  async function sendHeartbeat() {
+    try {
+      const info = await getSystemInfo();
+      const heartbeatData = {
+        device_id: deviceId,
+        cpu_usage: info.cpu_usage,
+        memory_usage: info.memory_usage,
+        disk_usage: info.disk_usage,
+        metadata: info.metadata
+      };
+
+      // Send via WebSocket
+      socket.emit('heartbeat', heartbeatData);
+
+      // Also via REST API as backup
+      await axios.post(`${SERVER_URL}/api/agent/heartbeat`, heartbeatData, {
+        headers: { 'X-Agent-Secret': AGENT_SECRET }
+      });
+    } catch (error) {
+      logger.error(`Heartbeat error: ${error.message}`);
+    }
+  }
+
+  // Initial heartbeat + interval
+  sendHeartbeat();
+  setInterval(sendHeartbeat, HEARTBEAT_INTERVAL);
+
+  logger.info(`💓 Heartbeat interval: ${HEARTBEAT_INTERVAL / 1000}s`);
+  logger.info('✅ Agent running. Waiting for commands...');
+}
+
+// ─── Start ───────────────────────────────────────────────────
+main().catch(err => {
+  logger.error('Agent fatal error:', err);
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  logger.info('Agent shutting down...');
+  process.exit(0);
+});
