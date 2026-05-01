@@ -123,15 +123,24 @@ const PORT = process.env.PORT || 4000;
 
 async function startServer() {
   try {
-    // Test database connection
-    await sequelize.authenticate();
-    logger.info('✅ Database connection established');
-
-    // Sync models (use migrations in production)
-    if (process.env.NODE_ENV !== 'production') {
-      await sequelize.sync({ alter: true });
-      logger.info('✅ Database models synchronized');
+    // Test database connection with retry
+    let retries = 5;
+    while (retries > 0) {
+      try {
+        await sequelize.authenticate();
+        logger.info('✅ Database connection established');
+        break;
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw err;
+        logger.warn(`Database not ready, retrying in 3s... (${retries} retries left)`);
+        await new Promise(r => setTimeout(r, 3000));
+      }
     }
+
+    // Sync models — create tables if they don't exist (safe in all environments)
+    await sequelize.sync({ alter: false });
+    logger.info('✅ Database models synchronized');
 
     server.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running on port ${PORT}`);
