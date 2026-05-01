@@ -17,8 +17,8 @@ const sequelize = new Sequelize(
     logging: (msg) => logger.debug(msg),
     pool: {
       max: 20,
-      min: 5,
-      acquire: 30000,
+      min: 0,
+      acquire: 60000,
       idle: 10000
     },
     define: {

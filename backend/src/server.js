@@ -155,7 +155,18 @@ async function startServer() {
   connectDB();
 }
 
-startServer();
+// Catch any unhandled rejections / uncaught exceptions so the process doesn't crash silently
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+startServer().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {
