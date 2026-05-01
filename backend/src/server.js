@@ -122,35 +122,37 @@ app.set('io', io);
 const PORT = process.env.PORT || 4000;
 
 async function startServer() {
-  try {
-    // Test database connection with retry
-    let retries = 5;
-    while (retries > 0) {
-      try {
-        await sequelize.authenticate();
-        logger.info('✅ Database connection established');
-        break;
-      } catch (err) {
-        retries--;
-        if (retries === 0) throw err;
-        logger.warn(`Database not ready, retrying in 3s... (${retries} retries left)`);
-        await new Promise(r => setTimeout(r, 3000));
-      }
-    }
-
-    // Sync models — create tables if they don't exist (safe in all environments)
-    await sequelize.sync({ alter: false });
-    logger.info('✅ Database models synchronized');
-
+  // Listen immediately so the container never crashes due to DB delay
+  await new Promise((resolve, reject) => {
     server.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`📡 WebSocket server ready`);
       logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      resolve();
     });
-  } catch (error) {
-    logger.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
+    server.on('error', reject);
+  });
+
+  // Connect to DB and sync schema in the background (retrying indefinitely)
+  const connectDB = async () => {
+    let retries = 20;
+    while (retries > 0) {
+      try {
+        await sequelize.authenticate();
+        logger.info('✅ Database connection established');
+        await sequelize.sync({ alter: false });
+        logger.info('✅ Database models synchronized');
+        return;
+      } catch (err) {
+        retries--;
+        logger.warn(`DB not ready, retrying in 5s... (${retries} left): ${err.message}`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+    logger.error('❌ Could not connect to database after all retries — routes may fail');
+  };
+
+  connectDB();
 }
 
 startServer();
