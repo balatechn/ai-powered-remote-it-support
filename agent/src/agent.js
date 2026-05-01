@@ -4,7 +4,10 @@
  * sends heartbeats/telemetry, and executes remote scripts.
  */
 
-require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
+// Load agent-local .env first (overrides root), then fall back to root .env
+const dotenv = require('dotenv');
+dotenv.config({ path: require('path').resolve(__dirname, '../.env') });       // agent/.env
+dotenv.config({ path: require('path').resolve(__dirname, '../../.env') });    // root .env (fallback)
 
 const { io } = require('socket.io-client');
 const axios = require('axios');
