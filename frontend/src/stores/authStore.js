@@ -7,6 +7,10 @@ const useAuthStore = create((set, get) => ({
   isLoading: true,
 
   initialize: async () => {
+    // Already initialized — skip to avoid duplicate /api/auth/me calls
+    const state = get();
+    if (!state.isLoading) return;
+
     const token = localStorage.getItem('accessToken');
     if (!token) {
       set({ isLoading: false });

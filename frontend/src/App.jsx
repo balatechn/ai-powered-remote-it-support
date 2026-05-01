@@ -41,7 +41,7 @@ export default function App() {
 
   useEffect(() => {
     initialize();
-  }, [initialize]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Router>

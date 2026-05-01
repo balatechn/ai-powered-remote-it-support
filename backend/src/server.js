@@ -69,13 +69,16 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for auth endpoints
+// Stricter rate limit for login/register only (not me/refresh which are called frequently)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { error: 'Too many authentication attempts.' }
 });
-app.use('/api/auth/', authLimiter);
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
 
 // ─── Health Check ────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
